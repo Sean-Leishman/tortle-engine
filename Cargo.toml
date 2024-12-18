@@ -1,0 +1,10 @@
+[package]
+name = "chess"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "torte"
+path = "src/main.rs"
+
+[dependencies]
