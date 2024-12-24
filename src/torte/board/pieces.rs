@@ -3,6 +3,22 @@ pub enum Color {
     Black,
 }
 
+impl Color {
+    pub fn opposite(&self) -> Color {
+        match self {
+            Color::White => Color::Black,
+            Color::Black => Color::White,
+        }
+    }
+
+    pub fn to_index(&self) -> usize {
+        match self {
+            Color::White => 0,
+            Color::Black => 1,
+        }
+    }
+}
+
 pub enum Piece {
     WhitePawn,
     WhiteKnight,

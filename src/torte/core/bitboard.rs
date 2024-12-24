@@ -13,6 +13,10 @@ impl Bitboard {
         Bitboard { board: 0 }
     }
 
+    pub const fn from_u64(board: u64) -> Bitboard {
+        Bitboard { board }
+    }
+
     pub fn set(&mut self, index: usize) {
         self.board |= 1 << index;
     }
