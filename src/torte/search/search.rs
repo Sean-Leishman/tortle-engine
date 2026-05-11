@@ -76,6 +76,7 @@ pub struct SearchConfig {
     pub mid_search_abort: bool,
     pub null_move_pruning: bool,
     pub aspiration_windows: bool,
+    pub late_move_reductions: bool,
 }
 
 impl Default for SearchConfig {
@@ -90,6 +91,7 @@ impl Default for SearchConfig {
             mid_search_abort: true,
             null_move_pruning: true,
             aspiration_windows: true,
+            late_move_reductions: true,
         }
     }
 }
@@ -113,6 +115,19 @@ const NULL_MOVE_REDUCTION: u32 = 2;
 /// Skip null-move pruning shallower than this. Below the threshold the saved
 /// work doesn't justify the risk of pruning a tactical line.
 const NULL_MOVE_MIN_DEPTH: u32 = 3;
+
+/// LMR ply reduction. Conservative R=1 keeps the risk of tactical blindness
+/// low while still trimming the tail of the move list at every node.
+const LMR_REDUCTION: u32 = 1;
+
+/// Skip LMR shallower than this; below 3 the saved work isn't worth the
+/// re-search risk.
+const LMR_MIN_DEPTH: u32 = 3;
+
+/// Index (0-based) at which to start reducing in the move list. The first
+/// three moves (TT move, top MVV-LVA captures, killers) are searched at
+/// full depth; the tail gets reduced.
+const LMR_MIN_MOVE_IDX: usize = 3;
 
 pub fn find_best_move(board: &Board, depth: u32) -> Option<(Move, i32)> {
     find_best_move_with(board, depth, SearchConfig::default())
@@ -434,22 +449,60 @@ fn negamax(
     }
 
     let mut best_move = moves[0];
+    let parent_in_check = in_check(board);
 
-    for m in moves {
+    for (move_index, m) in moves.into_iter().enumerate() {
         let mut next = *board;
         next.apply_move(m).unwrap();
-        let score = -negamax(
-            &next,
-            depth - 1,
-            -beta,
-            -alpha,
-            ply + 1,
-            config,
-            tt,
-            killers,
-            abort,
-            nodes,
-        );
+        let do_lmr = config.late_move_reductions
+            && depth >= LMR_MIN_DEPTH
+            && move_index >= LMR_MIN_MOVE_IDX
+            && !parent_in_check
+            && !is_capture(board, m)
+            && m.get_promotion().is_none();
+        let mut score = if do_lmr {
+            -negamax(
+                &next,
+                depth - 1 - LMR_REDUCTION,
+                -beta,
+                -alpha,
+                ply + 1,
+                config,
+                tt,
+                killers,
+                abort,
+                nodes,
+            )
+        } else {
+            -negamax(
+                &next,
+                depth - 1,
+                -beta,
+                -alpha,
+                ply + 1,
+                config,
+                tt,
+                killers,
+                abort,
+                nodes,
+            )
+        };
+        // Re-search at full depth if the reduced search beat alpha — the
+        // reduction may have hidden a real improvement.
+        if do_lmr && score > alpha && !(config.mid_search_abort && abort.fire()) {
+            score = -negamax(
+                &next,
+                depth - 1,
+                -beta,
+                -alpha,
+                ply + 1,
+                config,
+                tt,
+                killers,
+                abort,
+                nodes,
+            );
+        }
         if config.mid_search_abort && abort.fire() {
             return alpha;
         }
@@ -1079,6 +1132,40 @@ mod tests {
         )
         .unwrap();
         assert_eq!(with_nmp.1, without_nmp.1);
+    }
+
+    #[test]
+    fn late_move_reductions_match_no_lmr_score() {
+        // LMR is a search-shape optimization; with re-search on alpha-improvement
+        // the final score must match the full-depth search.
+        let board = pos("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1");
+        let with_lmr = find_best_move_with(
+            &board,
+            4,
+            SearchConfig { late_move_reductions: true, ..SearchConfig::default() },
+        )
+        .unwrap();
+        let without_lmr = find_best_move_with(
+            &board,
+            4,
+            SearchConfig { late_move_reductions: false, ..SearchConfig::default() },
+        )
+        .unwrap();
+        assert_eq!(with_lmr.1, without_lmr.1);
+    }
+
+    #[test]
+    fn late_move_reductions_finds_mate_in_one() {
+        // Mate-in-1 must still be found with LMR on — the mate move is the
+        // first move tried (TT/MVV hints), well before the LMR cutoff.
+        let board = pos("k7/8/1K6/3Q4/8/8/8/8 w - - 0 1");
+        let (_, score) = find_best_move_with(
+            &board,
+            2,
+            SearchConfig { late_move_reductions: true, ..SearchConfig::default() },
+        )
+        .unwrap();
+        assert_eq!(score, MATE_SCORE - 1);
     }
 
     #[test]

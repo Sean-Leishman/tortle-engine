@@ -110,6 +110,10 @@ fn emit_options(config: &SearchConfig) {
         config.aspiration_windows
     ));
     emit(&format!(
+        "option name LateMoveReductions type check default {}",
+        config.late_move_reductions
+    ));
+    emit(&format!(
         "option name Hash type spin default {} min {} max {}",
         DEFAULT_HASH_MB, MIN_HASH_MB, MAX_HASH_MB
     ));
@@ -164,6 +168,11 @@ pub fn apply_setoption(args: &str, config: &mut SearchConfig, tt: &mut Transposi
         "AspirationWindows" => {
             if let Some(b) = parse_bool(&value) {
                 config.aspiration_windows = b;
+            }
+        }
+        "LateMoveReductions" => {
+            if let Some(b) = parse_bool(&value) {
+                config.late_move_reductions = b;
             }
         }
         "Hash" => {
@@ -560,6 +569,16 @@ mod tests {
         assert!(!config.aspiration_windows);
         setopt("name AspirationWindows value true", &mut config);
         assert!(config.aspiration_windows);
+    }
+
+    #[test]
+    fn setoption_toggles_late_move_reductions() {
+        let mut config = SearchConfig::default();
+        assert!(config.late_move_reductions);
+        setopt("name LateMoveReductions value false", &mut config);
+        assert!(!config.late_move_reductions);
+        setopt("name LateMoveReductions value true", &mut config);
+        assert!(config.late_move_reductions);
     }
 
     #[test]
