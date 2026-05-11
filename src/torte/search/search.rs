@@ -6,6 +6,8 @@ use crate::torte::search::eval::{eval, PIECE_VALUES};
 use crate::torte::search::transposition::{
     zobrist_hash, Bound, TTEntry, TranspositionTable,
 };
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 pub const INFINITY: i32 = 30_000;
@@ -22,6 +24,45 @@ pub fn new_killers() -> KillerTable {
     [[None; 2]; MAX_PLY]
 }
 
+/// Combined "stop searching" signal: a wall-clock deadline and/or an atomic
+/// flag (typically set by UCI `stop`). Checked inside negamax/qsearch when the
+/// `mid_search_abort` toggle is on, so the search can interrupt a running
+/// iteration rather than only checking between iterations.
+#[derive(Clone, Default)]
+pub struct AbortSignal {
+    pub deadline: Option<Instant>,
+    pub stop: Option<Arc<AtomicBool>>,
+}
+
+impl AbortSignal {
+    pub fn never() -> Self {
+        Self::default()
+    }
+
+    pub fn with_deadline(deadline: Option<Instant>) -> Self {
+        Self { deadline, stop: None }
+    }
+
+    pub fn fire(&self) -> bool {
+        if let Some(s) = self.stop.as_ref() {
+            if s.load(Ordering::Relaxed) {
+                return true;
+            }
+        }
+        if let Some(dl) = self.deadline {
+            if Instant::now() >= dl {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// Every NODE_CHECK_INTERVAL nodes, consult the abort signal. AtomicBool
+/// loads are cheap, but `Instant::now()` adds up — bucketing the check keeps
+/// the deadline-check overhead well under 1% at typical nps.
+const NODE_CHECK_INTERVAL: u64 = 2048;
+
 /// Toggleable search features. New features (quiescence, iterative deepening,
 /// transposition table, ...) get added as fields here so each can be turned on
 /// or off independently — useful for measuring impact and for debugging
@@ -34,6 +75,7 @@ pub struct SearchConfig {
     pub transposition_table: bool,
     pub piece_square_tables: bool,
     pub killer_moves: bool,
+    pub mid_search_abort: bool,
 }
 
 impl Default for SearchConfig {
@@ -45,6 +87,7 @@ impl Default for SearchConfig {
             transposition_table: true,
             piece_square_tables: true,
             killer_moves: true,
+            mid_search_abort: true,
         }
     }
 }
@@ -60,7 +103,7 @@ pub fn find_best_move_with(
 ) -> Option<(Move, i32)> {
     let mut tt = TranspositionTable::default_size();
     let mut killers = new_killers();
-    find_best_move_with_tt(board, depth, config, &mut tt, &mut killers)
+    find_best_move_with_tt(board, depth, config, &mut tt, &mut killers, &AbortSignal::never())
 }
 
 /// Search progressively at depths 1..=max_depth. Allocates a fresh TT;
@@ -91,6 +134,30 @@ pub fn iterative_deepening_with_tt<F>(
 where
     F: FnMut(u32, Move, i32, Duration),
 {
+    iterative_deepening_with_abort(
+        board,
+        max_depth,
+        config,
+        AbortSignal::with_deadline(deadline),
+        tt,
+        &mut on_iteration,
+    )
+}
+
+/// Like `iterative_deepening_with_tt`, but accepts a full `AbortSignal`
+/// (deadline + optional stop flag) so a UCI `stop` can interrupt the search
+/// mid-iteration when `config.mid_search_abort` is on.
+pub fn iterative_deepening_with_abort<F>(
+    board: &Board,
+    max_depth: u32,
+    config: SearchConfig,
+    abort: AbortSignal,
+    tt: &mut TranspositionTable,
+    on_iteration: &mut F,
+) -> Option<(Move, i32)>
+where
+    F: FnMut(u32, Move, i32, Duration),
+{
     let start = Instant::now();
     let mut last_best: Option<(Move, i32)> = None;
     // Killers persist across ID iterations: a quiet move that caused a cutoff
@@ -98,13 +165,17 @@ where
     let mut killers = new_killers();
 
     for d in 1..=max_depth {
-        if let Some(dl) = deadline {
-            if Instant::now() >= dl {
-                break;
-            }
+        if abort.fire() {
+            break;
         }
 
-        match find_best_move_with_tt(board, d, config, tt, &mut killers) {
+        let result = find_best_move_with_tt(board, d, config, tt, &mut killers, &abort);
+        // If the iteration was interrupted mid-flight, its result is unreliable —
+        // discard it and fall back to the deepest fully-completed iteration.
+        if abort.fire() {
+            break;
+        }
+        match result {
             Some((mv, score)) => {
                 on_iteration(d, mv, score, start.elapsed());
                 last_best = Some((mv, score));
@@ -125,6 +196,7 @@ pub fn find_best_move_with_tt(
     config: SearchConfig,
     tt: &mut TranspositionTable,
     killers: &mut KillerTable,
+    abort: &AbortSignal,
 ) -> Option<(Move, i32)> {
     let mut moves = generate_legal_moves(board);
     if moves.is_empty() {
@@ -147,11 +219,28 @@ pub fn find_best_move_with_tt(
     let depth = depth.max(1);
     let mut best_move = moves[0];
     let mut best_score = -INFINITY;
+    let mut nodes: u64 = 0;
 
     for m in moves {
         let mut next = *board;
         next.apply_move(m).unwrap();
-        let score = -negamax(&next, depth - 1, -INFINITY, -best_score, 1, config, tt, killers);
+        let score = -negamax(
+            &next,
+            depth - 1,
+            -INFINITY,
+            -best_score,
+            1,
+            config,
+            tt,
+            killers,
+            abort,
+            &mut nodes,
+        );
+        if config.mid_search_abort && abort.fire() {
+            // Result of this branch is unreliable; bail out and let the caller
+            // discard the iteration.
+            return Some((best_move, best_score));
+        }
         if score > best_score {
             best_score = score;
             best_move = m;
@@ -180,7 +269,16 @@ fn negamax(
     config: SearchConfig,
     tt: &mut TranspositionTable,
     killers: &mut KillerTable,
+    abort: &AbortSignal,
+    nodes: &mut u64,
 ) -> i32 {
+    *nodes += 1;
+    if config.mid_search_abort
+        && (*nodes & (NODE_CHECK_INTERVAL - 1)) == 0
+        && abort.fire()
+    {
+        return 0;
+    }
     let mut alpha = alpha;
     let original_alpha = alpha;
     let key = zobrist_hash(board);
@@ -203,7 +301,7 @@ fn negamax(
 
     if depth == 0 {
         return if config.quiescence {
-            qsearch(board, alpha, beta, ply, config)
+            qsearch(board, alpha, beta, ply, config, abort, nodes)
         } else {
             eval(board, config.piece_square_tables)
         };
@@ -222,7 +320,21 @@ fn negamax(
     for m in moves {
         let mut next = *board;
         next.apply_move(m).unwrap();
-        let score = -negamax(&next, depth - 1, -beta, -alpha, ply + 1, config, tt, killers);
+        let score = -negamax(
+            &next,
+            depth - 1,
+            -beta,
+            -alpha,
+            ply + 1,
+            config,
+            tt,
+            killers,
+            abort,
+            nodes,
+        );
+        if config.mid_search_abort && abort.fire() {
+            return alpha;
+        }
 
         if score >= beta {
             if config.killer_moves && !is_capture(board, m) && (ply as usize) < MAX_PLY {
@@ -297,7 +409,16 @@ fn qsearch(
     beta: i32,
     ply: u32,
     config: SearchConfig,
+    abort: &AbortSignal,
+    nodes: &mut u64,
 ) -> i32 {
+    *nodes += 1;
+    if config.mid_search_abort
+        && (*nodes & (NODE_CHECK_INTERVAL - 1)) == 0
+        && abort.fire()
+    {
+        return 0;
+    }
     let stand_pat = eval(board, config.piece_square_tables);
     if stand_pat >= beta {
         return beta;
@@ -316,7 +437,10 @@ fn qsearch(
     for m in moves {
         let mut next = *board;
         next.apply_move(m).unwrap();
-        let score = -qsearch(&next, -beta, -alpha, ply + 1, config);
+        let score = -qsearch(&next, -beta, -alpha, ply + 1, config, abort, nodes);
+        if config.mid_search_abort && abort.fire() {
+            return alpha;
+        }
         if score >= beta {
             return beta;
         }
@@ -697,6 +821,43 @@ mod tests {
         )
         .unwrap();
         assert_eq!(with_killers.1, without_killers.1);
+    }
+
+    #[test]
+    fn mid_search_abort_off_matches_default_score() {
+        // Toggling mid-search abort off should not change the score: it's a
+        // pure interruption mechanism, not a search-shape change.
+        let board = pos("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1");
+        let with_abort = find_best_move_with(
+            &board,
+            3,
+            SearchConfig { mid_search_abort: true, ..SearchConfig::default() },
+        )
+        .unwrap();
+        let without_abort = find_best_move_with(
+            &board,
+            3,
+            SearchConfig { mid_search_abort: false, ..SearchConfig::default() },
+        )
+        .unwrap();
+        assert_eq!(with_abort.1, without_abort.1);
+    }
+
+    #[test]
+    fn mid_search_abort_stops_via_atomic_flag() {
+        // A pre-set stop flag should make iterative deepening return no result
+        // (or at most the last completed iteration, which is none here).
+        let board = pos("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1");
+        let stop = Arc::new(AtomicBool::new(true));
+        let abort = AbortSignal {
+            deadline: None,
+            stop: Some(stop),
+        };
+        let mut tt = TranspositionTable::default_size();
+        let mut on_iter = |_: u32, _: Move, _: i32, _: Duration| {};
+        let result =
+            iterative_deepening_with_abort(&board, 6, SearchConfig::default(), abort, &mut tt, &mut on_iter);
+        assert!(result.is_none());
     }
 
     #[test]

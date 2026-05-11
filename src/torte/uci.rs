@@ -98,6 +98,10 @@ fn emit_options(config: &SearchConfig) {
         config.killer_moves
     ));
     emit(&format!(
+        "option name MidSearchAbort type check default {}",
+        config.mid_search_abort
+    ));
+    emit(&format!(
         "option name Hash type spin default {} min {} max {}",
         DEFAULT_HASH_MB, MIN_HASH_MB, MAX_HASH_MB
     ));
@@ -137,6 +141,11 @@ pub fn apply_setoption(args: &str, config: &mut SearchConfig, tt: &mut Transposi
         "KillerMoves" => {
             if let Some(b) = parse_bool(&value) {
                 config.killer_moves = b;
+            }
+        }
+        "MidSearchAbort" => {
+            if let Some(b) = parse_bool(&value) {
+                config.mid_search_abort = b;
             }
         }
         "Hash" => {
@@ -214,7 +223,8 @@ fn handle_go(board: &Board, args: GoArgs, config: SearchConfig, tt: &mut Transpo
         )
     } else {
         let mut killers = crate::torte::search::search::new_killers();
-        let r = find_best_move_with_tt(board, args.max_depth, config, tt, &mut killers);
+        let abort = crate::torte::search::search::AbortSignal::with_deadline(deadline);
+        let r = find_best_move_with_tt(board, args.max_depth, config, tt, &mut killers, &abort);
         if let Some((mv, score)) = r {
             emit(&format!(
                 "info depth {} score {} time {} pv {}",
@@ -502,6 +512,16 @@ mod tests {
         assert!(!config.killer_moves);
         setopt("name KillerMoves value true", &mut config);
         assert!(config.killer_moves);
+    }
+
+    #[test]
+    fn setoption_toggles_mid_search_abort() {
+        let mut config = SearchConfig::default();
+        assert!(config.mid_search_abort);
+        setopt("name MidSearchAbort value false", &mut config);
+        assert!(!config.mid_search_abort);
+        setopt("name MidSearchAbort value true", &mut config);
+        assert!(config.mid_search_abort);
     }
 
     #[test]
