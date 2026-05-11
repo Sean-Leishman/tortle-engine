@@ -1,6 +1,9 @@
 use crate::torte::board::pieces::{Color, Piece};
 use crate::torte::core::bitboard::Bitboard;
 use crate::torte::core::{piece_move::Move, sq::SQ};
+use crate::torte::search::transposition::{
+    castling_key, ep_file_key, piece_key, side_key, zobrist_hash,
+};
 use std::fmt;
 
 #[derive(Clone, Copy)]
@@ -47,6 +50,10 @@ pub struct Board {
     pub en_passant: Option<SQ>,
     pub halfmove_clock: u16,
     pub fullmove_number: u16,
+    /// Incrementally maintained Zobrist hash. Kept in sync by `apply_move`
+    /// and `parse`/`new`. Search reads this directly instead of recomputing
+    /// from scratch at every TT probe.
+    pub zobrist: u64,
 }
 
 impl Board {
@@ -59,6 +66,7 @@ impl Board {
             en_passant: None,
             halfmove_clock: 0,
             fullmove_number: 1,
+            zobrist: 0,
         }
     }
 
@@ -124,10 +132,16 @@ impl Board {
             None => piece.to_index(),
         };
 
+        let old_castling = self.castling.0;
+        let old_ep = self.en_passant;
+
         self.bbs[piece.to_index()].clear(from_idx);
         self.bbs[dest_piece_idx].set(to_idx);
         self.player_bbs[mover_idx].clear(from_idx);
         self.player_bbs[mover_idx].set(to_idx);
+        // Hash: remove moving piece from `from`, add (possibly promoted) piece on `to`.
+        self.zobrist ^= piece_key(piece.to_index(), from_idx);
+        self.zobrist ^= piece_key(dest_piece_idx, to_idx);
 
         if is_ep_capture {
             let cap_idx = match mover {
@@ -141,6 +155,7 @@ impl Board {
             .to_index();
             self.bbs[opp_pawn_idx].clear(cap_idx);
             self.player_bbs[opp_idx].clear(cap_idx);
+            self.zobrist ^= piece_key(opp_pawn_idx, cap_idx);
         } else if is_normal_capture {
             let opp_range = match mover.opposite() {
                 Color::White => 0..6,
@@ -149,6 +164,7 @@ impl Board {
             for i in opp_range {
                 if self.bbs[i].get(to_idx) {
                     self.bbs[i].clear(to_idx);
+                    self.zobrist ^= piece_key(i, to_idx);
                     break;
                 }
             }
@@ -177,6 +193,8 @@ impl Board {
             self.bbs[rook_idx].set(rook_to);
             self.player_bbs[mover_idx].clear(rook_from);
             self.player_bbs[mover_idx].set(rook_to);
+            self.zobrist ^= piece_key(rook_idx, rook_from);
+            self.zobrist ^= piece_key(rook_idx, rook_to);
         }
 
         if is_king {
@@ -217,6 +235,21 @@ impl Board {
             self.fullmove_number += 1;
         }
         self.side_to_move = self.side_to_move.opposite();
+
+        // Hash: castling-rights and ep-file deltas (XOR old out, new in), then side flip.
+        if old_castling != self.castling.0 {
+            self.zobrist ^= castling_key(old_castling);
+            self.zobrist ^= castling_key(self.castling.0);
+        }
+        if old_ep != self.en_passant {
+            if let Some(ep) = old_ep {
+                self.zobrist ^= ep_file_key(ep.0 % 8);
+            }
+            if let Some(ep) = self.en_passant {
+                self.zobrist ^= ep_file_key(ep.0 % 8);
+            }
+        }
+        self.zobrist ^= side_key();
 
         Ok(())
     }
@@ -279,7 +312,7 @@ impl Board {
         let halfmove_clock = parts.get(4).and_then(|s| s.parse().ok()).unwrap_or(0);
         let fullmove_number = parts.get(5).and_then(|s| s.parse().ok()).unwrap_or(1);
 
-        Board {
+        let mut board = Board {
             bbs,
             player_bbs,
             side_to_move,
@@ -287,7 +320,10 @@ impl Board {
             en_passant,
             halfmove_clock,
             fullmove_number,
-        }
+            zobrist: 0,
+        };
+        board.zobrist = zobrist_hash(&board);
+        board
     }
 }
 

@@ -131,6 +131,31 @@ pub fn zobrist_hash(board: &Board) -> u64 {
     h
 }
 
+/// Key for a given piece kind (0..12) on a given square (0..64). Used by
+/// `Board::apply_move` to XOR-update the hash incrementally.
+#[inline]
+pub fn piece_key(kind: usize, sq: usize) -> u64 {
+    zobrist().pieces[kind][sq]
+}
+
+/// Key XORed into the hash when it's Black to move.
+#[inline]
+pub fn side_key() -> u64 {
+    zobrist().side
+}
+
+/// Key for the full 4-bit castling-rights mask.
+#[inline]
+pub fn castling_key(rights: u8) -> u64 {
+    zobrist().castling[(rights & 0xF) as usize]
+}
+
+/// Key for an en-passant target file (0..8).
+#[inline]
+pub fn ep_file_key(file: u8) -> u64 {
+    zobrist().en_passant_file[(file & 7) as usize]
+}
+
 struct Xorshift64 {
     state: u64,
 }
@@ -184,6 +209,76 @@ mod tests {
         let full = b("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1");
         let none = b("r3k2r/8/8/8/8/8/8/R3K2R w - - 0 1");
         assert_ne!(zobrist_hash(&full), zobrist_hash(&none));
+    }
+
+    #[test]
+    fn incremental_hash_matches_perft_kiwipete_d3() {
+        // Walk the entire legal-move tree of kiwipete to depth 3 and verify
+        // board.zobrist == zobrist_hash(&board) at every visited position.
+        use crate::torte::movegen::generator::generate_legal_moves;
+        use crate::torte::movegen::magic;
+        magic::init();
+        let board = b("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1");
+
+        fn walk(board: &Board, depth: u32) {
+            assert_eq!(board.zobrist, zobrist_hash(board), "drift detected");
+            if depth == 0 {
+                return;
+            }
+            for m in generate_legal_moves(board) {
+                let mut next = *board;
+                next.apply_move(m).unwrap();
+                walk(&next, depth - 1);
+            }
+        }
+        walk(&board, 3);
+    }
+
+    #[test]
+    fn incremental_hash_stays_in_sync_over_long_sequence() {
+        // Play a long forced sequence (one fully-legal game prefix) and
+        // verify the incrementally-maintained `board.zobrist` matches
+        // `zobrist_hash(&board)` after every single move.
+        use crate::torte::movegen::magic;
+        magic::init();
+        let mut board = b("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+        let moves = [
+            "e2e4", "c7c5", "g1f3", "d7d6", "d2d4", "c5d4", "f3d4", "g8f6",
+            "b1c3", "a7a6", "f1e2", "e7e6", "e1g1", "f8e7", "f2f4", "e8g8",
+            "c1e3", "b8c6", "d1d2", "e6e5",
+        ];
+        for mv in moves {
+            board.apply_uci_move(mv).unwrap();
+            assert_eq!(board.zobrist, zobrist_hash(&board), "drift after {}", mv);
+        }
+    }
+
+    #[test]
+    fn incremental_hash_matches_recompute_after_each_move() {
+        // For each move kind we care about (quiet, double-push, capture,
+        // en-passant, promotion, castle) verify board.zobrist after
+        // apply_move equals zobrist_hash(&board) recomputed from scratch.
+        let cases: &[(&str, &str)] = &[
+            // quiet
+            ("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", "b1c3"),
+            // double push (sets ep)
+            ("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", "e2e4"),
+            // capture
+            ("rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 2", "e4d5"),
+            // en passant
+            ("rnbqkbnr/pppp1ppp/8/3Pp3/8/8/PPP1PPPP/RNBQKBNR w KQkq e6 0 2", "d5e6"),
+            // promotion
+            ("8/P7/8/8/8/8/8/4k2K w - - 0 1", "a7a8q"),
+            // kingside castle (zeroes castling rights for the side)
+            ("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1", "e1g1"),
+            // rook move (loses one castling right)
+            ("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1", "a1a2"),
+        ];
+        for (fen, mv) in cases {
+            let mut board = b(fen);
+            board.apply_uci_move(mv).unwrap();
+            assert_eq!(board.zobrist, zobrist_hash(&board), "mismatch after {} from {}", mv, fen);
+        }
     }
 
     #[test]

@@ -3,9 +3,7 @@ use crate::torte::board::pieces::Color;
 use crate::torte::core::piece_move::Move;
 use crate::torte::movegen::generator::{generate_legal_moves, is_attacked, king_square};
 use crate::torte::search::eval::{eval, PIECE_VALUES};
-use crate::torte::search::transposition::{
-    zobrist_hash, Bound, TTEntry, TranspositionTable,
-};
+use crate::torte::search::transposition::{Bound, TTEntry, TranspositionTable};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -282,7 +280,7 @@ pub fn find_best_move_with_window(
 
     // At the root we don't return early on a TT hit (we need the best move),
     // but we do use the stored move as the ordering hint.
-    let key = zobrist_hash(board);
+    let key = board.zobrist;
     let tt_move = if config.transposition_table {
         tt.probe(key).and_then(|e| e.best_move)
     } else {
@@ -361,7 +359,7 @@ fn negamax(
     }
     let mut alpha = alpha;
     let original_alpha = alpha;
-    let key = zobrist_hash(board);
+    let key = board.zobrist;
 
     let mut tt_move: Option<Move> = None;
     if config.transposition_table {
@@ -398,8 +396,14 @@ fn negamax(
         && has_non_pawn_material(board, board.side_to_move)
     {
         let mut null = *board;
+        // Keep zobrist in sync: clear ep file (if any) and flip side.
+        if let Some(ep) = null.en_passant {
+            null.zobrist ^=
+                crate::torte::search::transposition::ep_file_key(ep.0 % 8);
+        }
         null.en_passant = None;
         null.side_to_move = board.side_to_move.opposite();
+        null.zobrist ^= crate::torte::search::transposition::side_key();
         let reduced = depth - 1 - NULL_MOVE_REDUCTION;
         let score = -negamax(
             &null,
