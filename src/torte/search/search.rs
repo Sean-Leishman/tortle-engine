@@ -11,6 +11,17 @@ use std::time::{Duration, Instant};
 pub const INFINITY: i32 = 30_000;
 pub const MATE_SCORE: i32 = 29_000;
 
+/// Maximum search depth supported for ply-indexed state (killers). The search
+/// itself can go deeper; ply-state updates are skipped past this bound.
+pub const MAX_PLY: usize = 64;
+
+/// Per-ply killer-move slots. Two slots per ply, most recent first.
+pub type KillerTable = [[Option<Move>; 2]; MAX_PLY];
+
+pub fn new_killers() -> KillerTable {
+    [[None; 2]; MAX_PLY]
+}
+
 /// Toggleable search features. New features (quiescence, iterative deepening,
 /// transposition table, ...) get added as fields here so each can be turned on
 /// or off independently — useful for measuring impact and for debugging
@@ -22,6 +33,7 @@ pub struct SearchConfig {
     pub iterative_deepening: bool,
     pub transposition_table: bool,
     pub piece_square_tables: bool,
+    pub killer_moves: bool,
 }
 
 impl Default for SearchConfig {
@@ -32,6 +44,7 @@ impl Default for SearchConfig {
             iterative_deepening: true,
             transposition_table: true,
             piece_square_tables: true,
+            killer_moves: true,
         }
     }
 }
@@ -46,7 +59,8 @@ pub fn find_best_move_with(
     config: SearchConfig,
 ) -> Option<(Move, i32)> {
     let mut tt = TranspositionTable::default_size();
-    find_best_move_with_tt(board, depth, config, &mut tt)
+    let mut killers = new_killers();
+    find_best_move_with_tt(board, depth, config, &mut tt, &mut killers)
 }
 
 /// Search progressively at depths 1..=max_depth. Allocates a fresh TT;
@@ -79,6 +93,9 @@ where
 {
     let start = Instant::now();
     let mut last_best: Option<(Move, i32)> = None;
+    // Killers persist across ID iterations: a quiet move that caused a cutoff
+    // at depth N-1 is still a promising candidate at depth N.
+    let mut killers = new_killers();
 
     for d in 1..=max_depth {
         if let Some(dl) = deadline {
@@ -87,7 +104,7 @@ where
             }
         }
 
-        match find_best_move_with_tt(board, d, config, tt) {
+        match find_best_move_with_tt(board, d, config, tt, &mut killers) {
             Some((mv, score)) => {
                 on_iteration(d, mv, score, start.elapsed());
                 last_best = Some((mv, score));
@@ -107,6 +124,7 @@ pub fn find_best_move_with_tt(
     depth: u32,
     config: SearchConfig,
     tt: &mut TranspositionTable,
+    killers: &mut KillerTable,
 ) -> Option<(Move, i32)> {
     let mut moves = generate_legal_moves(board);
     if moves.is_empty() {
@@ -123,7 +141,7 @@ pub fn find_best_move_with_tt(
     };
 
     if config.move_ordering {
-        order_moves_with_hint(board, &mut moves, tt_move);
+        order_moves(board, &mut moves, tt_move, killer_slice(killers, 0, config));
     }
 
     let depth = depth.max(1);
@@ -133,7 +151,7 @@ pub fn find_best_move_with_tt(
     for m in moves {
         let mut next = *board;
         next.apply_move(m).unwrap();
-        let score = -negamax(&next, depth - 1, -INFINITY, -best_score, 1, config, tt);
+        let score = -negamax(&next, depth - 1, -INFINITY, -best_score, 1, config, tt, killers);
         if score > best_score {
             best_score = score;
             best_move = m;
@@ -161,6 +179,7 @@ fn negamax(
     ply: u32,
     config: SearchConfig,
     tt: &mut TranspositionTable,
+    killers: &mut KillerTable,
 ) -> i32 {
     let mut alpha = alpha;
     let original_alpha = alpha;
@@ -195,7 +214,7 @@ fn negamax(
         return terminal_score(board, ply);
     }
     if config.move_ordering {
-        order_moves_with_hint(board, &mut moves, tt_move);
+        order_moves(board, &mut moves, tt_move, killer_slice(killers, ply, config));
     }
 
     let mut best_move = moves[0];
@@ -203,9 +222,16 @@ fn negamax(
     for m in moves {
         let mut next = *board;
         next.apply_move(m).unwrap();
-        let score = -negamax(&next, depth - 1, -beta, -alpha, ply + 1, config, tt);
+        let score = -negamax(&next, depth - 1, -beta, -alpha, ply + 1, config, tt, killers);
 
         if score >= beta {
+            if config.killer_moves && !is_capture(board, m) && (ply as usize) < MAX_PLY {
+                let slot = &mut killers[ply as usize];
+                if slot[0] != Some(m) {
+                    slot[1] = slot[0];
+                    slot[0] = Some(m);
+                }
+            }
             if config.transposition_table {
                 tt.store(TTEntry {
                     key,
@@ -284,7 +310,7 @@ fn qsearch(
     let mut moves = generate_legal_moves(board);
     moves.retain(|m| mvv_lva_score(board, *m) > 0);
     if config.move_ordering {
-        order_moves(board, &mut moves);
+        order_moves(board, &mut moves, None, [None, None]);
     }
 
     for m in moves {
@@ -313,15 +339,36 @@ fn terminal_score(board: &Board, ply: u32) -> i32 {
     }
 }
 
-fn order_moves(board: &Board, moves: &mut Vec<Move>) {
-    moves.sort_by_key(|m| -mvv_lva_score(board, *m));
+fn order_moves(
+    board: &Board,
+    moves: &mut Vec<Move>,
+    hint: Option<Move>,
+    killers: [Option<Move>; 2],
+) {
+    moves.sort_by_key(|m| {
+        if Some(*m) == hint {
+            return -1_000_000;
+        }
+        let mvv = mvv_lva_score(board, *m);
+        if mvv > 0 {
+            return -mvv;
+        }
+        if Some(*m) == killers[0] || Some(*m) == killers[1] {
+            return -50;
+        }
+        0
+    });
 }
 
-fn order_moves_with_hint(board: &Board, moves: &mut Vec<Move>, hint: Option<Move>) {
-    moves.sort_by_key(|m| {
-        let hint_bonus = if Some(*m) == hint { -1_000_000 } else { 0 };
-        hint_bonus - mvv_lva_score(board, *m)
-    });
+fn killer_slice(killers: &KillerTable, ply: u32, config: SearchConfig) -> [Option<Move>; 2] {
+    if !config.killer_moves || (ply as usize) >= MAX_PLY {
+        return [None, None];
+    }
+    killers[ply as usize]
+}
+
+pub fn is_capture(board: &Board, mv: Move) -> bool {
+    mvv_lva_score(board, mv) > 0
 }
 
 /// MVV-LVA: Most Valuable Victim minus Least Valuable Attacker. Captures of
@@ -624,5 +671,46 @@ mod tests {
             crate::torte::core::sq::SQ::make(3, 4),
         );
         assert_eq!(mvv_lva_score(&board, e2e4), 0);
+    }
+
+    #[test]
+    fn killer_moves_match_no_killer_score() {
+        // Killers are an ordering heuristic; results should be identical to a
+        // search with the heuristic off, on the same position at the same depth.
+        let board = pos("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1");
+        let with_killers = find_best_move_with(
+            &board,
+            3,
+            SearchConfig {
+                killer_moves: true,
+                ..SearchConfig::default()
+            },
+        )
+        .unwrap();
+        let without_killers = find_best_move_with(
+            &board,
+            3,
+            SearchConfig {
+                killer_moves: false,
+                ..SearchConfig::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(with_killers.1, without_killers.1);
+    }
+
+    #[test]
+    fn killer_moves_finds_mate_in_one() {
+        let board = pos("k7/8/1K6/3Q4/8/8/8/8 w - - 0 1");
+        let (_, score) = find_best_move_with(
+            &board,
+            2,
+            SearchConfig {
+                killer_moves: true,
+                ..SearchConfig::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(score, MATE_SCORE - 1);
     }
 }
