@@ -1,3 +1,4 @@
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Color {
     White,
     Black,
@@ -17,8 +18,17 @@ impl Color {
             Color::Black => 1,
         }
     }
+
+    pub fn from_fen(c: char) -> Option<Color> {
+        match c {
+            'w' => Some(Color::White),
+            'b' => Some(Color::Black),
+            _ => None,
+        }
+    }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Piece {
     WhitePawn,
     WhiteKnight,
