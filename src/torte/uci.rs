@@ -102,6 +102,10 @@ fn emit_options(config: &SearchConfig) {
         config.mid_search_abort
     ));
     emit(&format!(
+        "option name NullMovePruning type check default {}",
+        config.null_move_pruning
+    ));
+    emit(&format!(
         "option name Hash type spin default {} min {} max {}",
         DEFAULT_HASH_MB, MIN_HASH_MB, MAX_HASH_MB
     ));
@@ -146,6 +150,11 @@ pub fn apply_setoption(args: &str, config: &mut SearchConfig, tt: &mut Transposi
         "MidSearchAbort" => {
             if let Some(b) = parse_bool(&value) {
                 config.mid_search_abort = b;
+            }
+        }
+        "NullMovePruning" => {
+            if let Some(b) = parse_bool(&value) {
+                config.null_move_pruning = b;
             }
         }
         "Hash" => {
@@ -522,6 +531,16 @@ mod tests {
         assert!(!config.mid_search_abort);
         setopt("name MidSearchAbort value true", &mut config);
         assert!(config.mid_search_abort);
+    }
+
+    #[test]
+    fn setoption_toggles_null_move_pruning() {
+        let mut config = SearchConfig::default();
+        assert!(config.null_move_pruning);
+        setopt("name NullMovePruning value false", &mut config);
+        assert!(!config.null_move_pruning);
+        setopt("name NullMovePruning value true", &mut config);
+        assert!(config.null_move_pruning);
     }
 
     #[test]

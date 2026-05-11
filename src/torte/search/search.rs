@@ -76,6 +76,7 @@ pub struct SearchConfig {
     pub piece_square_tables: bool,
     pub killer_moves: bool,
     pub mid_search_abort: bool,
+    pub null_move_pruning: bool,
 }
 
 impl Default for SearchConfig {
@@ -88,9 +89,18 @@ impl Default for SearchConfig {
             piece_square_tables: true,
             killer_moves: true,
             mid_search_abort: true,
+            null_move_pruning: true,
         }
     }
 }
+
+/// Reduction `R` for null-move search: search at `depth - 1 - R`. R=2 is the
+/// classic conservative value; some engines use R=3 above depth 6.
+const NULL_MOVE_REDUCTION: u32 = 2;
+
+/// Skip null-move pruning shallower than this. Below the threshold the saved
+/// work doesn't justify the risk of pruning a tactical line.
+const NULL_MOVE_MIN_DEPTH: u32 = 3;
 
 pub fn find_best_move(board: &Board, depth: u32) -> Option<(Move, i32)> {
     find_best_move_with(board, depth, SearchConfig::default())
@@ -307,6 +317,40 @@ fn negamax(
         };
     }
 
+    // Null-move pruning. Skip in check (illegal — leaves king en prise) and
+    // in pawn/king endgames (zugzwang risk: the side to move benefits from
+    // giving up the turn, which never happens with real pieces). Skip near
+    // mate windows so we don't prune through a mate. Reduce by R.
+    if config.null_move_pruning
+        && depth >= NULL_MOVE_MIN_DEPTH
+        && beta.abs() < MATE_SCORE - 1000
+        && !in_check(board)
+        && has_non_pawn_material(board, board.side_to_move)
+    {
+        let mut null = *board;
+        null.en_passant = None;
+        null.side_to_move = board.side_to_move.opposite();
+        let reduced = depth - 1 - NULL_MOVE_REDUCTION;
+        let score = -negamax(
+            &null,
+            reduced,
+            -beta,
+            -beta + 1,
+            ply + 1,
+            config,
+            tt,
+            killers,
+            abort,
+            nodes,
+        );
+        if config.mid_search_abort && abort.fire() {
+            return alpha;
+        }
+        if score >= beta {
+            return beta;
+        }
+    }
+
     let mut moves = generate_legal_moves(board);
     if moves.is_empty() {
         return terminal_score(board, ply);
@@ -461,6 +505,27 @@ fn terminal_score(board: &Board, ply: u32) -> i32 {
     } else {
         0
     }
+}
+
+fn in_check(board: &Board) -> bool {
+    match king_square(board, board.side_to_move) {
+        Some(k) => is_attacked(board, k, board.side_to_move.opposite()),
+        None => false,
+    }
+}
+
+/// True if `side` has at least one knight/bishop/rook/queen on the board.
+/// Used as a zugzwang guard for null-move pruning — in pawn endgames giving
+/// up the turn often helps the side to move, which can't happen with real
+/// moves, so null-move-prune would lie.
+fn has_non_pawn_material(board: &Board, side: Color) -> bool {
+    let off = if side == Color::White { 0 } else { 6 };
+    // kinds 1..=4 are N/B/R/Q (kind 0 is pawn, kind 5 is king).
+    (board.bbs[off + 1].board
+        | board.bbs[off + 2].board
+        | board.bbs[off + 3].board
+        | board.bbs[off + 4].board)
+        != 0
 }
 
 fn order_moves(
@@ -858,6 +923,41 @@ mod tests {
         let result =
             iterative_deepening_with_abort(&board, 6, SearchConfig::default(), abort, &mut tt, &mut on_iter);
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn null_move_pruning_still_finds_mate_in_one() {
+        // NMP is a pruning heuristic; obvious tactics like mate-in-1 should
+        // still be found at any depth >= 2.
+        let board = pos("k7/8/1K6/3Q4/8/8/8/8 w - - 0 1");
+        let (_, score) = find_best_move_with(
+            &board,
+            2,
+            SearchConfig { null_move_pruning: true, ..SearchConfig::default() },
+        )
+        .unwrap();
+        assert_eq!(score, MATE_SCORE - 1);
+    }
+
+    #[test]
+    fn null_move_pruning_disabled_in_pawn_endgame() {
+        // KP vs K — only pawns and kings, so the zugzwang guard should hold
+        // and NMP shouldn't kick in. We verify by checking the result is the
+        // same as without NMP entirely.
+        let board = pos("8/8/4k3/8/8/8/4P3/4K3 w - - 0 1");
+        let with_nmp = find_best_move_with(
+            &board,
+            4,
+            SearchConfig { null_move_pruning: true, ..SearchConfig::default() },
+        )
+        .unwrap();
+        let without_nmp = find_best_move_with(
+            &board,
+            4,
+            SearchConfig { null_move_pruning: false, ..SearchConfig::default() },
+        )
+        .unwrap();
+        assert_eq!(with_nmp.1, without_nmp.1);
     }
 
     #[test]
