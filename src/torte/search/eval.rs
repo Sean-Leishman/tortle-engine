@@ -95,14 +95,54 @@ const KING_MG_PST: [i32; 64] = [
     -30, -40, -40, -50, -50, -40, -40, -30,
 ];
 
-fn pst_value(kind: usize, sq: usize) -> i32 {
+// Endgame king table: with few pieces left there's nothing to hide from, and
+// the king is a fighting piece. Center is rewarded, edges/corners punished.
+// Lerped against KING_MG_PST by game phase.
+#[rustfmt::skip]
+const KING_EG_PST: [i32; 64] = [
+    -50, -30, -30, -30, -30, -30, -30, -50,
+    -30, -30,   0,   0,   0,   0, -30, -30,
+    -30, -10,  20,  30,  30,  20, -10, -30,
+    -30, -10,  30,  40,  40,  30, -10, -30,
+    -30, -10,  30,  40,  40,  30, -10, -30,
+    -30, -10,  20,  30,  30,  20, -10, -30,
+    -30, -20, -10,   0,   0, -10, -20, -30,
+    -50, -40, -30, -20, -20, -30, -40, -50,
+];
+
+// Game-phase weights (Fruit-style). Sum at startpos = 4*(N+B) + 2*R + 4*Q
+// across both colours = 4 + 4 + 8 + 8 = 24 = `PHASE_MAX`. A pure pawn endgame
+// has phase 0. Pawns and kings don't contribute to phase.
+const PHASE_KNIGHT: i32 = 1;
+const PHASE_BISHOP: i32 = 1;
+const PHASE_ROOK: i32 = 2;
+const PHASE_QUEEN: i32 = 4;
+const PHASE_MAX: i32 = 24;
+
+fn game_phase(board: &Board) -> i32 {
+    let mut phase = 0_i32;
+    // bbs layout: 0..5 white P/N/B/R/Q/K, 6..11 black P/N/B/R/Q/K
+    phase += (board.bbs[1].board.count_ones() + board.bbs[7].board.count_ones()) as i32 * PHASE_KNIGHT;
+    phase += (board.bbs[2].board.count_ones() + board.bbs[8].board.count_ones()) as i32 * PHASE_BISHOP;
+    phase += (board.bbs[3].board.count_ones() + board.bbs[9].board.count_ones()) as i32 * PHASE_ROOK;
+    phase += (board.bbs[4].board.count_ones() + board.bbs[10].board.count_ones()) as i32 * PHASE_QUEEN;
+    phase.min(PHASE_MAX)
+}
+
+fn king_pst_tapered(sq: usize, phase: i32) -> i32 {
+    let mg = KING_MG_PST[sq];
+    let eg = KING_EG_PST[sq];
+    (mg * phase + eg * (PHASE_MAX - phase)) / PHASE_MAX
+}
+
+fn pst_value(kind: usize, sq: usize, phase: i32) -> i32 {
     match kind {
         0 => PAWN_PST[sq],
         1 => KNIGHT_PST[sq],
         2 => BISHOP_PST[sq],
         3 => ROOK_PST[sq],
         4 => QUEEN_PST[sq],
-        5 => KING_MG_PST[sq],
+        5 => king_pst_tapered(sq, phase),
         _ => 0,
     }
 }
@@ -113,13 +153,14 @@ fn pst_value(kind: usize, sq: usize) -> i32 {
 /// pulling in the search module's types.
 pub fn eval(board: &Board, use_pst: bool) -> i32 {
     let mut score = 0;
+    let phase = if use_pst { game_phase(board) } else { 0 };
     for kind in 0..6 {
         let mut bb = board.bbs[kind].board;
         while bb != 0 {
             let sq = bb.trailing_zeros() as usize;
             score += PIECE_VALUES[kind];
             if use_pst {
-                score += pst_value(kind, sq);
+                score += pst_value(kind, sq, phase);
             }
             bb &= bb - 1;
         }
@@ -128,7 +169,7 @@ pub fn eval(board: &Board, use_pst: bool) -> i32 {
             let sq = bb.trailing_zeros() as usize;
             score -= PIECE_VALUES[kind];
             if use_pst {
-                score -= pst_value(kind, sq ^ 56);
+                score -= pst_value(kind, sq ^ 56, phase);
             }
             bb &= bb - 1;
         }
@@ -177,6 +218,31 @@ mod tests {
         // Same material; with PST on, central knight should score strictly higher.
         assert!(eval(&center, true) > eval(&corner, true));
         // With PST off the positions are identical material-wise.
+        assert_eq!(eval(&center, false), eval(&corner, false));
+    }
+
+    #[test]
+    fn game_phase_at_startpos_is_max() {
+        let board = Board::parse("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+        assert_eq!(game_phase(&board), PHASE_MAX);
+    }
+
+    #[test]
+    fn game_phase_at_pure_king_pawn_is_zero() {
+        // Only kings and pawns: no phase contribution.
+        let board = Board::parse("4k3/pppppppp/8/8/8/8/PPPPPPPP/4K3 w - - 0 1");
+        assert_eq!(game_phase(&board), 0);
+    }
+
+    #[test]
+    fn endgame_king_prefers_center_over_corner() {
+        // K+P vs k endgame. With tapered king PST, the white king on the
+        // center should evaluate strictly better than the white king in the
+        // corner — same material, but only positional difference is the king.
+        let center = Board::parse("8/8/4k3/8/4K3/8/4P3/8 w - - 0 1");
+        let corner = Board::parse("8/8/4k3/8/8/8/4P3/K7 w - - 0 1");
+        assert!(eval(&center, true) > eval(&corner, true));
+        // Material-only: identical.
         assert_eq!(eval(&center, false), eval(&corner, false));
     }
 
