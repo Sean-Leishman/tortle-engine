@@ -1,4 +1,6 @@
 use crate::torte::board::board::Board;
+use crate::torte::movegen::magic;
+use crate::torte::uci;
 
 pub struct Torte {
     pub board: Board,
@@ -12,26 +14,8 @@ impl Torte {
     }
 
     pub fn run(&mut self) {
-        println!("Running Torte");
-        self.board = Board::parse("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
-        println!("{:?}", self.board);
-
-        while true {
-            let mut input = String::new();
-            println!("Enter move: ");
-            std::io::stdin().read_line(&mut input).unwrap();
-
-            if input.trim() == "exit" {
-                break;
-            }
-
-            let res = self.board.apply_uci_move(input.trim());
-            if res.is_err() {
-                println!("Invalid move: {:?}", res.err().unwrap());
-            }
-
-            println!("{:?}", self.board);
-        }
-        println!("{:?}", self.board);
+        magic::init();
+        self.board = Board::parse(uci::STARTPOS);
+        uci::run(&mut self.board);
     }
 }
