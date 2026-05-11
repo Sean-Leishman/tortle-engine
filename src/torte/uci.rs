@@ -11,13 +11,16 @@ pub const STARTPOS: &str = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -
 const NAME: &str = "torte";
 const AUTHOR: &str = "Sean Leishman";
 const DEFAULT_DEPTH: u32 = 6;
+const DEFAULT_HASH_MB: usize = 16;
+const MIN_HASH_MB: usize = 1;
+const MAX_HASH_MB: usize = 1024;
 
 pub fn run(board: &mut Board) {
     let stdin = io::stdin();
     let mut handle = stdin.lock();
     let mut line = String::new();
     let mut config = SearchConfig::default();
-    let mut tt = TranspositionTable::default_size();
+    let mut tt = TranspositionTable::new(DEFAULT_HASH_MB);
 
     loop {
         line.clear();
@@ -52,7 +55,7 @@ pub fn run(board: &mut Board) {
                     emit("info string failed to parse position");
                 }
             }
-            "setoption" => apply_setoption(rest, &mut config),
+            "setoption" => apply_setoption(rest, &mut config, &mut tt),
             "go" => handle_go(board, parse_go(rest, board.side_to_move), config, &mut tt),
             "d" | "board" => {
                 println!("{:?}", board);
@@ -90,9 +93,13 @@ fn emit_options(config: &SearchConfig) {
         "option name PieceSquareTables type check default {}",
         config.piece_square_tables
     ));
+    emit(&format!(
+        "option name Hash type spin default {} min {} max {}",
+        DEFAULT_HASH_MB, MIN_HASH_MB, MAX_HASH_MB
+    ));
 }
 
-pub fn apply_setoption(args: &str, config: &mut SearchConfig) {
+pub fn apply_setoption(args: &str, config: &mut SearchConfig, tt: &mut TranspositionTable) {
     let (name, value) = match parse_setoption(args) {
         Some(v) => v,
         None => return,
@@ -121,6 +128,12 @@ pub fn apply_setoption(args: &str, config: &mut SearchConfig) {
         "PieceSquareTables" => {
             if let Some(b) = parse_bool(&value) {
                 config.piece_square_tables = b;
+            }
+        }
+        "Hash" => {
+            if let Ok(mb) = value.trim().parse::<usize>() {
+                let clamped = mb.clamp(MIN_HASH_MB, MAX_HASH_MB);
+                *tt = TranspositionTable::new(clamped);
             }
         }
         _ => {
@@ -405,24 +418,29 @@ mod tests {
         assert_eq!(format_score(-456), "cp -456");
     }
 
+    fn setopt(args: &str, config: &mut SearchConfig) {
+        let mut tt = TranspositionTable::new(1);
+        apply_setoption(args, config, &mut tt);
+    }
+
     #[test]
     fn setoption_toggles_move_ordering() {
         let mut config = SearchConfig::default();
         assert!(config.move_ordering);
-        apply_setoption("name MoveOrdering value false", &mut config);
+        setopt("name MoveOrdering value false", &mut config);
         assert!(!config.move_ordering);
-        apply_setoption("name MoveOrdering value true", &mut config);
+        setopt("name MoveOrdering value true", &mut config);
         assert!(config.move_ordering);
     }
 
     #[test]
     fn setoption_accepts_alternate_bools() {
         let mut config = SearchConfig::default();
-        apply_setoption("name MoveOrdering value off", &mut config);
+        setopt("name MoveOrdering value off", &mut config);
         assert!(!config.move_ordering);
-        apply_setoption("name MoveOrdering value on", &mut config);
+        setopt("name MoveOrdering value on", &mut config);
         assert!(config.move_ordering);
-        apply_setoption("name MoveOrdering value 0", &mut config);
+        setopt("name MoveOrdering value 0", &mut config);
         assert!(!config.move_ordering);
     }
 
@@ -430,9 +448,9 @@ mod tests {
     fn setoption_toggles_quiescence() {
         let mut config = SearchConfig::default();
         assert!(config.quiescence);
-        apply_setoption("name Quiescence value false", &mut config);
+        setopt("name Quiescence value false", &mut config);
         assert!(!config.quiescence);
-        apply_setoption("name Quiescence value true", &mut config);
+        setopt("name Quiescence value true", &mut config);
         assert!(config.quiescence);
     }
 
@@ -440,9 +458,9 @@ mod tests {
     fn setoption_toggles_iterative_deepening() {
         let mut config = SearchConfig::default();
         assert!(config.iterative_deepening);
-        apply_setoption("name IterativeDeepening value false", &mut config);
+        setopt("name IterativeDeepening value false", &mut config);
         assert!(!config.iterative_deepening);
-        apply_setoption("name IterativeDeepening value true", &mut config);
+        setopt("name IterativeDeepening value true", &mut config);
         assert!(config.iterative_deepening);
     }
 
@@ -450,9 +468,9 @@ mod tests {
     fn setoption_toggles_transposition_table() {
         let mut config = SearchConfig::default();
         assert!(config.transposition_table);
-        apply_setoption("name TranspositionTable value false", &mut config);
+        setopt("name TranspositionTable value false", &mut config);
         assert!(!config.transposition_table);
-        apply_setoption("name TranspositionTable value true", &mut config);
+        setopt("name TranspositionTable value true", &mut config);
         assert!(config.transposition_table);
     }
 
@@ -460,18 +478,37 @@ mod tests {
     fn setoption_toggles_piece_square_tables() {
         let mut config = SearchConfig::default();
         assert!(config.piece_square_tables);
-        apply_setoption("name PieceSquareTables value false", &mut config);
+        setopt("name PieceSquareTables value false", &mut config);
         assert!(!config.piece_square_tables);
-        apply_setoption("name PieceSquareTables value true", &mut config);
+        setopt("name PieceSquareTables value true", &mut config);
         assert!(config.piece_square_tables);
     }
 
     #[test]
     fn setoption_unknown_is_noop() {
         let mut config = SearchConfig::default();
-        apply_setoption("name SomethingElse value true", &mut config);
+        setopt("name SomethingElse value true", &mut config);
         // No panic, default unchanged.
         assert!(config.move_ordering);
+    }
+
+    #[test]
+    fn setoption_hash_resizes_tt() {
+        let mut config = SearchConfig::default();
+        let mut tt = TranspositionTable::new(1);
+        let small_cap = tt.capacity();
+        apply_setoption("name Hash value 64", &mut config, &mut tt);
+        assert!(tt.capacity() > small_cap);
+    }
+
+    #[test]
+    fn setoption_hash_clamps_to_range() {
+        let mut config = SearchConfig::default();
+        let mut tt = TranspositionTable::new(16);
+        let baseline = tt.capacity();
+        // Value above max should still produce a valid resize at max.
+        apply_setoption("name Hash value 99999", &mut config, &mut tt);
+        assert!(tt.capacity() >= baseline);
     }
 
     #[test]
