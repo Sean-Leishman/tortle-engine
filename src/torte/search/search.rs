@@ -21,6 +21,7 @@ pub struct SearchConfig {
     pub quiescence: bool,
     pub iterative_deepening: bool,
     pub transposition_table: bool,
+    pub piece_square_tables: bool,
 }
 
 impl Default for SearchConfig {
@@ -30,6 +31,7 @@ impl Default for SearchConfig {
             quiescence: true,
             iterative_deepening: true,
             transposition_table: true,
+            piece_square_tables: true,
         }
     }
 }
@@ -184,7 +186,7 @@ fn negamax(
         return if config.quiescence {
             qsearch(board, alpha, beta, ply, config)
         } else {
-            eval(board)
+            eval(board, config.piece_square_tables)
         };
     }
 
@@ -270,7 +272,7 @@ fn qsearch(
     ply: u32,
     config: SearchConfig,
 ) -> i32 {
-    let stand_pat = eval(board);
+    let stand_pat = eval(board, config.piece_square_tables);
     if stand_pat >= beta {
         return beta;
     }
@@ -390,7 +392,14 @@ mod tests {
     #[test]
     fn captures_free_material() {
         let board = pos("4k3/8/8/1q6/8/2N5/8/4K3 w - - 0 1");
-        let (mv, score) = find_best_move(&board, 2).unwrap();
+        // PST contributions change the absolute score; disable to keep this
+        // test focused on material math.
+        let (mv, score) = find_best_move_with(
+            &board,
+            2,
+            SearchConfig { piece_square_tables: false, ..SearchConfig::default() },
+        )
+        .unwrap();
         assert_eq!(mv.to_uci(), "c3b5");
         assert_eq!(score, 320);
     }
@@ -456,6 +465,7 @@ mod tests {
             SearchConfig {
                 move_ordering: true,
                 quiescence: true,
+                piece_square_tables: false,
                 ..SearchConfig::default()
             },
         )
@@ -466,6 +476,7 @@ mod tests {
             SearchConfig {
                 move_ordering: true,
                 quiescence: false,
+                piece_square_tables: false,
                 ..SearchConfig::default()
             },
         )
@@ -593,8 +604,14 @@ mod tests {
     #[test]
     fn quiescence_does_not_break_simple_finds() {
         // Sanity: every test that passed without quiescence still passes with it.
+        // Disable PSTs so the assertion is on raw material (320 = knight value).
         let board = pos("4k3/8/8/1q6/8/2N5/8/4K3 w - - 0 1");
-        let (mv, score) = find_best_move_with(&board, 2, SearchConfig::default()).unwrap();
+        let (mv, score) = find_best_move_with(
+            &board,
+            2,
+            SearchConfig { piece_square_tables: false, ..SearchConfig::default() },
+        )
+        .unwrap();
         assert_eq!(mv.to_uci(), "c3b5");
         assert_eq!(score, 320);
     }

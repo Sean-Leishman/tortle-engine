@@ -86,6 +86,10 @@ fn emit_options(config: &SearchConfig) {
         "option name TranspositionTable type check default {}",
         config.transposition_table
     ));
+    emit(&format!(
+        "option name PieceSquareTables type check default {}",
+        config.piece_square_tables
+    ));
 }
 
 pub fn apply_setoption(args: &str, config: &mut SearchConfig) {
@@ -112,6 +116,11 @@ pub fn apply_setoption(args: &str, config: &mut SearchConfig) {
         "TranspositionTable" => {
             if let Some(b) = parse_bool(&value) {
                 config.transposition_table = b;
+            }
+        }
+        "PieceSquareTables" => {
+            if let Some(b) = parse_bool(&value) {
+                config.piece_square_tables = b;
             }
         }
         _ => {
@@ -445,6 +454,16 @@ mod tests {
         assert!(!config.transposition_table);
         apply_setoption("name TranspositionTable value true", &mut config);
         assert!(config.transposition_table);
+    }
+
+    #[test]
+    fn setoption_toggles_piece_square_tables() {
+        let mut config = SearchConfig::default();
+        assert!(config.piece_square_tables);
+        apply_setoption("name PieceSquareTables value false", &mut config);
+        assert!(!config.piece_square_tables);
+        apply_setoption("name PieceSquareTables value true", &mut config);
+        assert!(config.piece_square_tables);
     }
 
     #[test]
