@@ -77,6 +77,7 @@ pub struct SearchConfig {
     pub killer_moves: bool,
     pub mid_search_abort: bool,
     pub null_move_pruning: bool,
+    pub aspiration_windows: bool,
 }
 
 impl Default for SearchConfig {
@@ -90,9 +91,22 @@ impl Default for SearchConfig {
             killer_moves: true,
             mid_search_abort: true,
             null_move_pruning: true,
+            aspiration_windows: true,
         }
     }
 }
+
+/// Starting half-width for the aspiration window around the previous ID
+/// iteration's score. On fail high/low we re-search at full width.
+/// Tactical mid-game positions can swing >50cp between iterations, so we
+/// use 100 to make fail-high/low rare; the trade-off is a slightly wider
+/// (less productive) window when aspiration succeeds.
+const ASPIRATION_DELTA: i32 = 100;
+
+/// Skip aspiration windowing below this depth. Shallow iterations are fast
+/// regardless, and their score is least stable — narrow-windowing them
+/// causes more re-searches than savings.
+const ASPIRATION_MIN_DEPTH: u32 = 5;
 
 /// Reduction `R` for null-move search: search at `depth - 1 - R`. R=2 is the
 /// classic conservative value; some engines use R=3 above depth 6.
@@ -179,7 +193,7 @@ where
             break;
         }
 
-        let result = find_best_move_with_tt(board, d, config, tt, &mut killers, &abort);
+        let result = search_one_iteration(board, d, &last_best, config, tt, &mut killers, &abort);
         // If the iteration was interrupted mid-flight, its result is unreliable —
         // discard it and fall back to the deepest fully-completed iteration.
         if abort.fire() {
@@ -200,9 +214,62 @@ where
     last_best
 }
 
+/// One ID iteration. If aspiration windows are enabled and we have a previous
+/// iteration's score, search with a narrow `[score-delta, score+delta]` window;
+/// on fail-high or fail-low, re-search with a full window. Otherwise full
+/// window directly.
+fn search_one_iteration(
+    board: &Board,
+    depth: u32,
+    last_best: &Option<(Move, i32)>,
+    config: SearchConfig,
+    tt: &mut TranspositionTable,
+    killers: &mut KillerTable,
+    abort: &AbortSignal,
+) -> Option<(Move, i32)> {
+    if !config.aspiration_windows || depth < ASPIRATION_MIN_DEPTH {
+        return find_best_move_with_tt(board, depth, config, tt, killers, abort);
+    }
+    let prev_score = match *last_best {
+        Some((_, s)) if s.abs() < MATE_SCORE - 1000 => s,
+        // First iteration or near-mate score: no useful window to narrow to.
+        _ => return find_best_move_with_tt(board, depth, config, tt, killers, abort),
+    };
+
+    let alpha = prev_score - ASPIRATION_DELTA;
+    let beta = prev_score + ASPIRATION_DELTA;
+    let result = find_best_move_with_window(board, depth, alpha, beta, config, tt, killers, abort)?;
+    let (_, score) = result;
+    if score <= alpha || score >= beta {
+        // Fail high/low: the true score lies outside our guess. Re-search at
+        // full width to get the correct best move and score.
+        find_best_move_with_tt(board, depth, config, tt, killers, abort)
+    } else {
+        Some(result)
+    }
+}
+
 pub fn find_best_move_with_tt(
     board: &Board,
     depth: u32,
+    config: SearchConfig,
+    tt: &mut TranspositionTable,
+    killers: &mut KillerTable,
+    abort: &AbortSignal,
+) -> Option<(Move, i32)> {
+    find_best_move_with_window(board, depth, -INFINITY, INFINITY, config, tt, killers, abort)
+}
+
+/// Root search with a caller-supplied `[alpha, beta]` window. Used by
+/// aspiration windows: passing a narrow window enables more cutoffs deeper
+/// in the tree. Returns the best move and its score; the score may be
+/// outside the window (fail-high / fail-low), and the caller is expected
+/// to detect that and re-search if needed.
+pub fn find_best_move_with_window(
+    board: &Board,
+    depth: u32,
+    alpha: i32,
+    beta: i32,
     config: SearchConfig,
     tt: &mut TranspositionTable,
     killers: &mut KillerTable,
@@ -228,7 +295,10 @@ pub fn find_best_move_with_tt(
 
     let depth = depth.max(1);
     let mut best_move = moves[0];
-    let mut best_score = -INFINITY;
+    // Seed best_score below the window so any in-window child score becomes
+    // the new best; if all children fall at-or-below alpha we still return
+    // alpha as the (fail-low) score.
+    let mut best_score = alpha;
     let mut nodes: u64 = 0;
 
     for m in moves {
@@ -237,7 +307,7 @@ pub fn find_best_move_with_tt(
         let score = -negamax(
             &next,
             depth - 1,
-            -INFINITY,
+            -beta,
             -best_score,
             1,
             config,
@@ -923,6 +993,53 @@ mod tests {
         let result =
             iterative_deepening_with_abort(&board, 6, SearchConfig::default(), abort, &mut tt, &mut on_iter);
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn aspiration_windows_match_no_aspiration_score() {
+        // Aspiration is a window-narrowing optimization; final scores must be
+        // identical to the full-window search after fail-high/low re-search.
+        let board = pos("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1");
+        let mut tt_a = TranspositionTable::default_size();
+        let mut tt_b = TranspositionTable::default_size();
+        let with_asp = iterative_deepening_with_tt(
+            &board,
+            4,
+            SearchConfig { aspiration_windows: true, ..SearchConfig::default() },
+            None,
+            &mut tt_a,
+            |_, _, _, _| {},
+        )
+        .unwrap();
+        let without_asp = iterative_deepening_with_tt(
+            &board,
+            4,
+            SearchConfig { aspiration_windows: false, ..SearchConfig::default() },
+            None,
+            &mut tt_b,
+            |_, _, _, _| {},
+        )
+        .unwrap();
+        assert_eq!(with_asp.1, without_asp.1);
+    }
+
+    #[test]
+    fn aspiration_recovers_on_fail_high() {
+        // Mate-in-1 produces a score far outside any 50cp window around 0
+        // (the depth-1 score before the mate is found). Aspiration must
+        // re-search and still find the mate.
+        let board = pos("k7/8/1K6/3Q4/8/8/8/8 w - - 0 1");
+        let mut tt = TranspositionTable::default_size();
+        let result = iterative_deepening_with_tt(
+            &board,
+            4,
+            SearchConfig::default(),
+            None,
+            &mut tt,
+            |_, _, _, _| {},
+        )
+        .unwrap();
+        assert_eq!(result.1, MATE_SCORE - 1);
     }
 
     #[test]

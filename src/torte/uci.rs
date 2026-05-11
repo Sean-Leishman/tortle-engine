@@ -106,6 +106,10 @@ fn emit_options(config: &SearchConfig) {
         config.null_move_pruning
     ));
     emit(&format!(
+        "option name AspirationWindows type check default {}",
+        config.aspiration_windows
+    ));
+    emit(&format!(
         "option name Hash type spin default {} min {} max {}",
         DEFAULT_HASH_MB, MIN_HASH_MB, MAX_HASH_MB
     ));
@@ -155,6 +159,11 @@ pub fn apply_setoption(args: &str, config: &mut SearchConfig, tt: &mut Transposi
         "NullMovePruning" => {
             if let Some(b) = parse_bool(&value) {
                 config.null_move_pruning = b;
+            }
+        }
+        "AspirationWindows" => {
+            if let Some(b) = parse_bool(&value) {
+                config.aspiration_windows = b;
             }
         }
         "Hash" => {
@@ -541,6 +550,16 @@ mod tests {
         assert!(!config.null_move_pruning);
         setopt("name NullMovePruning value true", &mut config);
         assert!(config.null_move_pruning);
+    }
+
+    #[test]
+    fn setoption_toggles_aspiration_windows() {
+        let mut config = SearchConfig::default();
+        assert!(config.aspiration_windows);
+        setopt("name AspirationWindows value false", &mut config);
+        assert!(!config.aspiration_windows);
+        setopt("name AspirationWindows value true", &mut config);
+        assert!(config.aspiration_windows);
     }
 
     #[test]
