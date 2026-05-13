@@ -8,17 +8,29 @@ A closer look at the data structures and the edges between them. Pairs with `arc
 src/
   main.rs                       // entry, builds a Torte and calls run()
   torte/
-    mod.rs                      // pub mod board; pub mod core; pub mod torte;
+    mod.rs                      // pub mod board; pub mod core; pub mod movegen; pub mod torte;
     torte.rs                    // struct Torte { board: Board }; run() = stdin REPL
     board/
       mod.rs                    // pub mod board; pub mod pieces;
-      board.rs                  // struct Board, FEN parse, apply_*_move, Debug printer
+      board.rs                  // struct Board, struct CastlingRights, FEN parse, apply_move, Debug printer
       pieces.rs                 // enum Color, enum Piece, FEN/index/glyph mappings
     core/
       mod.rs                    // pub mod bitboard; pub mod piece_move; pub mod sq;
       bitboard.rs               // struct Bitboard(u64) and op overloads
-      piece_move.rs             // struct Move { src, dest }, from_uci
-      sq.rs                     // struct SQ(u8), make(rank, file), to_bb()
+      piece_move.rs             // struct Move, enum PromotionPiece, from_uci
+      sq.rs                     // struct SQ(u8), make(rank, file), from_uci, to_bb()
+    movegen/
+      mod.rs                    // pub mod attacks, generator, magic, perft;
+      attacks.rs                // KNIGHT/KING/PAWN attack tables built via const fn
+      magic.rs                  // plain magic bitboards for rook/bishop, search-at-startup
+      generator.rs              // is_attacked, generate_legal_moves, king_square
+      perft.rs                  // perft + perft_divide for movegen verification
+    search/
+      mod.rs                    // pub mod eval, search, transposition;
+      eval.rs                   // material-only static eval
+      search.rs                 // negamax + alpha-beta + ID + qsearch + TT integration
+      transposition.rs          // Zobrist keys/hash, TTEntry, Bound, TranspositionTable
+    uci.rs                      // UCI protocol loop (run, parse_position, parse_go_depth, format_score)
 ```
 
 Note: every directory uses a `mod.rs` that just re-exports siblings, and each leaf file is named after its primary type's snake_case (e.g. `Board` lives in `board.rs` inside `board/`). Imports therefore look stuttery: `crate::torte::board::board::Board`.
@@ -59,10 +71,18 @@ Operator semantics:
 ## Move
 
 ```rust
-pub struct Move { src: SQ, dest: SQ }
+pub struct Move {
+    src: SQ,
+    dest: SQ,
+    promotion: Option<PromotionPiece>,
+}
+
+pub enum PromotionPiece { Knight, Bishop, Rook, Queen }
 ```
 
-Just two squares. No promotion piece, no flags for castle / en-passant / capture / double-pawn-push. `from_uci` is hard-coded to `len() == 4` and panics otherwise. UCI move strings are parsed as `(file, rank, file, rank)` characters, ASCII-arithmetic-style:
+Two squares plus an optional promotion piece. No explicit flags for castle / en-passant / double-pawn-push — those are inferred in `Board::apply_move` from `(piece, src, dest, en_passant)`. `from_uci` accepts 4-char (`e2e4`) and 5-char (`e7e8q`) forms; promotion char is `n`/`b`/`r`/`q`. Anything else panics.
+
+UCI move strings are parsed as `(file, rank, file, rank)` characters, ASCII-arithmetic-style:
 
 ```
 file = uci[i] - b'a'   // 'a'..'h' -> 0..7
@@ -84,20 +104,21 @@ rank = uci[i+1] - b'1' // '1'..'8' -> 0..7
 pub struct Board {
     pub bbs: [Bitboard; 12],
     pub player_bbs: [Bitboard; 2],
+    pub side_to_move: Color,
+    pub castling: CastlingRights, // u8 bitfield, KQkq
+    pub en_passant: Option<SQ>,
+    pub halfmove_clock: u16,
+    pub fullmove_number: u16,
 }
 ```
 
-State *not* on `Board` (yet):
-- side to move
-- castling rights
-- en-passant target square
-- halfmove clock
-- fullmove number
-- zobrist hash
+State still *not* on `Board`: zobrist hash.
 
-`Board::parse(fen)` only consumes the piece-placement field. `Board::new()` returns a fully empty board.
+`Board::parse(fen)` consumes all six FEN fields; missing trailing fields fall back to defaults (white to move, no castling, no ep, halfmove 0, fullmove 1). `Board::new()` returns an empty board with the same defaults. Castling rights are stored as a `u8` with constants `WHITE_KING | WHITE_QUEEN | BLACK_KING | BLACK_QUEEN`.
 
-`apply_uci_move` -> `apply_move(Move)` -> `move_piece(piece, from, to)`. The chain re-scans the bitboards in both `apply_move` (via `piece_at_sq`) and `move_piece`, so the `piece` argument to `move_piece` is currently dead. Only `bbs` is updated; `player_bbs` is not. Captures, castling, en-passant, and promotion are not handled.
+`apply_move` mutates all of these fields each call: flips `side_to_move`, sets/clears `en_passant`, masks `castling` on king/rook/rook-capture moves, resets `halfmove_clock` on captures or pawn moves (else +1), and increments `fullmove_number` after black's move.
+
+`apply_uci_move` -> `apply_move(Move)` -> `move_piece(piece, from, to)`. `apply_move` looks up the moving piece via `piece_at_sq`; `move_piece` then updates `bbs` and `player_bbs` together and clears any opponent piece on `to` (capture). Castling, en-passant, and promotion are not handled.
 
 ## Torte (driver)
 
@@ -105,10 +126,6 @@ State *not* on `Board` (yet):
 pub struct Torte { pub board: Board }
 ```
 
-`run()`:
-1. Print "Running Torte".
-2. `self.board = Board::parse(STARTPOS_FEN)`.
-3. Loop: print board, read line, break on `exit`, else `apply_uci_move`, print error or board.
-4. After loop, print board once more.
+`run()`: initializes magic tables, parses the start FEN into `self.board`, and hands off to `uci::run(&mut self.board)` which is the actual command loop. There is no separate REPL implementation any more — the UCI loop in `uci.rs` accepts both UCI commands and a few REPL conveniences (bare moves, `d`, plain-integer `go N`).
 
-This is the only "engine driver" code in the repo. There is no UCI handler, no time management, no thread for searching, no anything else.
+No time management, no async search thread, no ponder.

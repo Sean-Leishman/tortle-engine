@@ -13,17 +13,15 @@ So the "real" name is probably *Tortle* (with the engine binary clipped to *tort
 
 ## Things that are obviously broken / unfinished
 
-- `move_piece` doesn't touch `player_bbs`, doesn't remove captured pieces, and re-scans for the moving piece instead of trusting the `piece: Piece` argument it was passed.
-- `Board::parse` sets `player_bbs` correctly *during parsing* but never thereafter, so it's only a snapshot of the start position.
-- `Board::parse` ignores everything after the first FEN field. There is also nowhere on `Board` to put side-to-move, castling rights, en passant, halfmove, fullmove.
-- `Move::from_uci` panics on anything other than a 4-char string. UCI legitimately uses 5 chars for promotions.
+- `Move::from_uci` still panics on truly malformed input (length != 4 && != 5, or unknown promotion char). The REPL crashes on bad input as a result.
+- `apply_move` does no legality checking: doesn't enforce side-to-move, doesn't check castling-through-check or rook-still-there, accepts pawn captures onto empty squares (sometimes resolving as ep, sometimes as a no-op capture), etc. Movegen is the layer that should produce only legal moves.
 - `while true` in `Torte::run` should be `loop`.
 - `let mut board = parts[0].split('/');` is later shadowed by the real `Board { ... }` binding. Confusing but harmless.
 - `number_of_pieces` is computed in `parse` and dropped on the floor.
 
 ## Bitboard layout choice
 
-The current FEN parser stores rank 8 in bits 0..7 and rank 1 in bits 56..63 — the opposite of the more common "a1 = bit 0" convention. The display layer compensates, so the board prints right-side-up, but any future move-generation code (especially anything that wants to use shifts to push pawns) needs to pick a convention and stick with it. Switching to a1 = bit 0 is the standard choice and makes pawn pushes a clean `bb << 8` (white) / `bb >> 8` (black). Worth doing before adding any movegen.
+The board uses the conventional "a1 = bit 0" layout: a1..h1 = bits 0..7, a8..h8 = bits 56..63. White pawn pushes are `bb << 8`, black pawn pushes are `bb >> 8`. `Board::parse` flips FEN ranks (rank 8 first in the string -> bits 56..63) so the storage matches `SQ::make(rank, file) = rank * 8 + file`.
 
 ## Operator overload semantics
 
@@ -33,12 +31,18 @@ The current FEN parser stores rank 8 in bits 0..7 and rank 1 in bits 56..63 — 
 
 In rough order:
 
-1. Add side-to-move + castling/en-passant/clock fields to `Board`, finish FEN parsing.
-2. Fix `move_piece` to maintain `player_bbs`, remove captured pieces, and handle castling / en-passant / promotion.
-3. Add an attack-table layer for non-sliding pieces (knight, king, pawn) plus sliding-piece movegen (start with Kindergarten or simple ray-loop, magic bitboards later).
-4. `generate_moves(&Board) -> Vec<Move>` and a `perft` driver (compare against known node counts from the start position — `perft(5) = 4865609`).
-5. Then think about search and eval. Negamax + alpha-beta + simple material eval is the usual smallest playable thing.
-6. Real UCI loop: `uci`, `isready`, `position [startpos|fen ...] [moves ...]`, `go`, `bestmove`, `quit`.
+1. ~~Add side-to-move + castling/en-passant/clock fields to `Board`, finish FEN parsing.~~ (done)
+2. ~~Extend `move_piece` (and `Move`) to handle castling, en-passant, and promotion, and to *mutate* `side_to_move` / castling rights / ep square / clocks on each move.~~ (done — `apply_move` now infers castle/ep/double-push from src+dest+piece, handles 5-char promotion UCI, and mutates all the new fields)
+3. ~~Attack tables for all six pieces.~~ (done — non-sliding via compile-time `const fn` in `attacks.rs`; sliding via plain magic bitboards in `magic.rs`, magics searched at startup with xorshift sparse-magic search.)
+4. ~~`generate_moves(&Board) -> Vec<Move>` and a `perft` driver.~~ (done — `generator.rs` does pseudo-legal + post-move king-safety filter; `perft.rs` matches published numbers for startpos d1..d5 and kiwipete d1..d3.)
+5. Search and eval. Eval is material-only (`search/eval.rs`); search is negamax + alpha-beta + mate scoring (`search/search.rs`). Each strengthening feature is a `SearchConfig` field that can be toggled via UCI `setoption` — this lets you A/B-test improvements one at a time. Done so far:
+   - MVV-LVA move ordering (toggle `MoveOrdering`, default on; ~3× speedup on tactical positions).
+   - Quiescence search (toggle `Quiescence`, default on; fixes the horizon effect at low depths).
+   - Iterative deepening (toggle `IterativeDeepening`, default on; emits info per iteration; short-circuits on mate; enables `go movetime` / `go wtime/btime` via between-iteration deadline check).
+   - Transposition table (toggle `TranspositionTable`, default on; 16 MB default; Zobrist hashing computed from scratch per node; ~2.2× speedup on kiwipete d6; mate scores adjusted by ply on store/retrieve; TT move used as PV ordering hint).
+   - Piece-square tables (toggle `PieceSquareTables`, default on; six 64-entry tables P/N/B/R/Q/K-mg; black pieces mirror via `sq ^ 56`; gives real opening play vs material-only's `a2a3`).
+   - Pending: killers/history, null-move pruning, mid-search abort, qsearch refinements (check evasions, promotion handling), incremental Zobrist hashing, UCI `Hash` size option, endgame king PST + tapered eval.
+6. ~~Real UCI loop.~~ (done — `uci.rs` handles `uci`/`isready`/`ucinewgame`/`position`/`go`/`stop`/`quit` and emits `info ... pv <mv>` + `bestmove`. No time management yet — only `go depth N` is honoured; other `go` variants fall back to default depth 6. Async/stop-during-search isn't supported because the search is synchronous.)
 
 ## Open questions
 
