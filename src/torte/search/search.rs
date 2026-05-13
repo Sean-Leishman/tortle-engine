@@ -77,6 +77,7 @@ pub struct SearchConfig {
     pub null_move_pruning: bool,
     pub aspiration_windows: bool,
     pub late_move_reductions: bool,
+    pub futility_pruning: bool,
 }
 
 impl Default for SearchConfig {
@@ -92,6 +93,7 @@ impl Default for SearchConfig {
             null_move_pruning: true,
             aspiration_windows: true,
             late_move_reductions: true,
+            futility_pruning: true,
         }
     }
 }
@@ -128,6 +130,18 @@ const LMR_MIN_DEPTH: u32 = 3;
 /// three moves (TT move, top MVV-LVA captures, killers) are searched at
 /// full depth; the tail gets reduced.
 const LMR_MIN_MOVE_IDX: usize = 3;
+
+/// Apply futility pruning only at frontier depths. At depth 3+ the search
+/// tree is large enough that a single quiet move can swing the score by more
+/// than a fixed margin.
+const FUTILITY_MAX_DEPTH: u32 = 2;
+
+/// Per-depth futility margin in centipawns. The eval would have to gain more
+/// than this from any single quiet move to lift static_eval above alpha; if
+/// even with the margin we can't reach alpha, prune the quiet moves.
+fn futility_margin(depth: u32) -> i32 {
+    (depth as i32) * 150
+}
 
 pub fn find_best_move(board: &Board, depth: u32) -> Option<(Move, i32)> {
     find_best_move_with(board, depth, SearchConfig::default())
@@ -451,7 +465,26 @@ fn negamax(
     let mut best_move = moves[0];
     let parent_in_check = in_check(board);
 
+    // Futility pruning eligibility (constant for this node): at frontier
+    // depths, if even adding a generous margin to the static eval can't
+    // reach alpha, then any *quiet* non-promotion move is very unlikely to
+    // lift the score above alpha — so we skip them entirely. We always
+    // evaluate the first move (best-ordered) so the node has a real score.
+    let futility_prune = config.futility_pruning
+        && depth <= FUTILITY_MAX_DEPTH
+        && !parent_in_check
+        && alpha.abs() < MATE_SCORE - 1000
+        && beta.abs() < MATE_SCORE - 1000
+        && eval(board, config.piece_square_tables) + futility_margin(depth) <= alpha;
+
     for (move_index, m) in moves.into_iter().enumerate() {
+        if futility_prune
+            && move_index > 0
+            && !is_capture(board, m)
+            && m.get_promotion().is_none()
+        {
+            continue;
+        }
         let mut next = *board;
         next.apply_move(m).unwrap();
         let do_lmr = config.late_move_reductions
@@ -1132,6 +1165,41 @@ mod tests {
         )
         .unwrap();
         assert_eq!(with_nmp.1, without_nmp.1);
+    }
+
+    #[test]
+    fn futility_pruning_matches_no_futility_score() {
+        // Futility is a pruning heuristic, but skipped quiet moves are by
+        // construction unable to lift static_eval above alpha. The score must
+        // therefore match the no-futility search at the same depth.
+        let board = pos("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1");
+        let with_f = find_best_move_with(
+            &board,
+            4,
+            SearchConfig { futility_pruning: true, ..SearchConfig::default() },
+        )
+        .unwrap();
+        let without_f = find_best_move_with(
+            &board,
+            4,
+            SearchConfig { futility_pruning: false, ..SearchConfig::default() },
+        )
+        .unwrap();
+        assert_eq!(with_f.1, without_f.1);
+    }
+
+    #[test]
+    fn futility_pruning_finds_mate_in_one() {
+        // Mate-in-1 must still be found: the mate-window check disables
+        // futility when alpha is near MATE_SCORE.
+        let board = pos("k7/8/1K6/3Q4/8/8/8/8 w - - 0 1");
+        let (_, score) = find_best_move_with(
+            &board,
+            2,
+            SearchConfig { futility_pruning: true, ..SearchConfig::default() },
+        )
+        .unwrap();
+        assert_eq!(score, MATE_SCORE - 1);
     }
 
     #[test]

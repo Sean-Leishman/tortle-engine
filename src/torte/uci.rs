@@ -114,6 +114,10 @@ fn emit_options(config: &SearchConfig) {
         config.late_move_reductions
     ));
     emit(&format!(
+        "option name FutilityPruning type check default {}",
+        config.futility_pruning
+    ));
+    emit(&format!(
         "option name Hash type spin default {} min {} max {}",
         DEFAULT_HASH_MB, MIN_HASH_MB, MAX_HASH_MB
     ));
@@ -173,6 +177,11 @@ pub fn apply_setoption(args: &str, config: &mut SearchConfig, tt: &mut Transposi
         "LateMoveReductions" => {
             if let Some(b) = parse_bool(&value) {
                 config.late_move_reductions = b;
+            }
+        }
+        "FutilityPruning" => {
+            if let Some(b) = parse_bool(&value) {
+                config.futility_pruning = b;
             }
         }
         "Hash" => {
@@ -569,6 +578,16 @@ mod tests {
         assert!(!config.aspiration_windows);
         setopt("name AspirationWindows value true", &mut config);
         assert!(config.aspiration_windows);
+    }
+
+    #[test]
+    fn setoption_toggles_futility_pruning() {
+        let mut config = SearchConfig::default();
+        assert!(config.futility_pruning);
+        setopt("name FutilityPruning value false", &mut config);
+        assert!(!config.futility_pruning);
+        setopt("name FutilityPruning value true", &mut config);
+        assert!(config.futility_pruning);
     }
 
     #[test]
