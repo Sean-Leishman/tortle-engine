@@ -78,6 +78,7 @@ pub struct SearchConfig {
     pub aspiration_windows: bool,
     pub late_move_reductions: bool,
     pub futility_pruning: bool,
+    pub razoring: bool,
 }
 
 impl Default for SearchConfig {
@@ -94,6 +95,9 @@ impl Default for SearchConfig {
             aspiration_windows: true,
             late_move_reductions: true,
             futility_pruning: true,
+            // Razoring is off by default — see RAZOR_MAX_DEPTH note. Toggle
+            // on via `setoption name Razoring value true` for experiments.
+            razoring: false,
         }
     }
 }
@@ -141,6 +145,31 @@ const FUTILITY_MAX_DEPTH: u32 = 2;
 /// even with the margin we can't reach alpha, prune the quiet moves.
 fn futility_margin(depth: u32) -> i32 {
     (depth as i32) * 150
+}
+
+/// Apply razoring only at shallow depths where dropping into qsearch
+/// approximates the full search closely enough that the heuristic mistake
+/// rate is acceptable.
+///
+/// NOTE: razoring is **off by default** in this engine — empirical testing
+/// on kiwipete d7 showed it was a wash-to-loss against our already-strong
+/// pruning stack (TT, NMP, futility, LMR, aspiration). The code is kept
+/// behind the toggle for re-tuning experiments (try null-window qsearch,
+/// different margins, depth-only ranges, different positions).
+const RAZOR_MAX_DEPTH: u32 = 3;
+
+/// Per-depth razoring margin. Wider than futility's because razoring
+/// replaces the whole subtree with a capture-only search — we only want to
+/// risk that when the static eval is *very* far below alpha. A misfire
+/// (qsearch ≥ alpha) costs the qsearch plus the full search we still have
+/// to do.
+fn razor_margin(depth: u32) -> i32 {
+    match depth {
+        1 => 500,
+        2 => 800,
+        3 => 1300,
+        _ => 0,
+    }
 }
 
 pub fn find_best_move(board: &Board, depth: u32) -> Option<(Move, i32)> {
@@ -414,6 +443,37 @@ fn negamax(
         };
     }
 
+    let node_in_check = in_check(board);
+
+    // Static eval is needed by razoring and by futility eligibility below;
+    // compute it once, lazily, the first time something asks for it.
+    let mut static_eval: Option<i32> = None;
+    let in_safe_window =
+        alpha.abs() < MATE_SCORE - 1000 && beta.abs() < MATE_SCORE - 1000;
+
+    // Razoring: at shallow depths, if even a generous margin can't lift the
+    // static eval to alpha, replace the search with qsearch. If qsearch
+    // confirms below alpha, return that score (a fail-low at this node).
+    // Caller's alpha-beta will not improve alpha from a sub-alpha return,
+    // so this is heuristic but doesn't change the result when it's right.
+    if config.razoring
+        && depth <= RAZOR_MAX_DEPTH
+        && !node_in_check
+        && in_safe_window
+    {
+        let se = *static_eval
+            .get_or_insert_with(|| eval(board, config.piece_square_tables));
+        if se + razor_margin(depth) < alpha {
+            let score = qsearch(board, alpha, beta, ply, config, abort, nodes);
+            if config.mid_search_abort && abort.fire() {
+                return alpha;
+            }
+            if score < alpha {
+                return score;
+            }
+        }
+    }
+
     // Null-move pruning. Skip in check (illegal — leaves king en prise) and
     // in pawn/king endgames (zugzwang risk: the side to move benefits from
     // giving up the turn, which never happens with real pieces). Skip near
@@ -421,7 +481,7 @@ fn negamax(
     if config.null_move_pruning
         && depth >= NULL_MOVE_MIN_DEPTH
         && beta.abs() < MATE_SCORE - 1000
-        && !in_check(board)
+        && !node_in_check
         && has_non_pawn_material(board, board.side_to_move)
     {
         let mut null = *board;
@@ -463,7 +523,6 @@ fn negamax(
     }
 
     let mut best_move = moves[0];
-    let parent_in_check = in_check(board);
 
     // Futility pruning eligibility (constant for this node): at frontier
     // depths, if even adding a generous margin to the static eval can't
@@ -472,10 +531,13 @@ fn negamax(
     // evaluate the first move (best-ordered) so the node has a real score.
     let futility_prune = config.futility_pruning
         && depth <= FUTILITY_MAX_DEPTH
-        && !parent_in_check
-        && alpha.abs() < MATE_SCORE - 1000
-        && beta.abs() < MATE_SCORE - 1000
-        && eval(board, config.piece_square_tables) + futility_margin(depth) <= alpha;
+        && !node_in_check
+        && in_safe_window
+        && {
+            let se = *static_eval
+                .get_or_insert_with(|| eval(board, config.piece_square_tables));
+            se + futility_margin(depth) <= alpha
+        };
 
     for (move_index, m) in moves.into_iter().enumerate() {
         if futility_prune
@@ -490,7 +552,7 @@ fn negamax(
         let do_lmr = config.late_move_reductions
             && depth >= LMR_MIN_DEPTH
             && move_index >= LMR_MIN_MOVE_IDX
-            && !parent_in_check
+            && !node_in_check
             && !is_capture(board, m)
             && m.get_promotion().is_none();
         let mut score = if do_lmr {
@@ -1165,6 +1227,41 @@ mod tests {
         )
         .unwrap();
         assert_eq!(with_nmp.1, without_nmp.1);
+    }
+
+    #[test]
+    fn razoring_finds_mate_in_one() {
+        // Razoring is gated by `in_safe_window` (alpha not near mate), so the
+        // mate-in-1 search should never razor through the mate.
+        let board = pos("k7/8/1K6/3Q4/8/8/8/8 w - - 0 1");
+        let (_, score) = find_best_move_with(
+            &board,
+            2,
+            SearchConfig { razoring: true, ..SearchConfig::default() },
+        )
+        .unwrap();
+        assert_eq!(score, MATE_SCORE - 1);
+    }
+
+    #[test]
+    fn razoring_finds_best_move_on_kiwipete() {
+        // Razoring is a heuristic so we can't require exact score parity, but
+        // on a well-known tactical position the best move should be unchanged
+        // from the no-razoring search at the same depth.
+        let board = pos("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1");
+        let with_r = find_best_move_with(
+            &board,
+            6,
+            SearchConfig { razoring: true, ..SearchConfig::default() },
+        )
+        .unwrap();
+        let without_r = find_best_move_with(
+            &board,
+            6,
+            SearchConfig { razoring: false, ..SearchConfig::default() },
+        )
+        .unwrap();
+        assert_eq!(with_r.0, without_r.0);
     }
 
     #[test]

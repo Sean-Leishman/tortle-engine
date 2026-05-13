@@ -118,6 +118,10 @@ fn emit_options(config: &SearchConfig) {
         config.futility_pruning
     ));
     emit(&format!(
+        "option name Razoring type check default {}",
+        config.razoring
+    ));
+    emit(&format!(
         "option name Hash type spin default {} min {} max {}",
         DEFAULT_HASH_MB, MIN_HASH_MB, MAX_HASH_MB
     ));
@@ -182,6 +186,11 @@ pub fn apply_setoption(args: &str, config: &mut SearchConfig, tt: &mut Transposi
         "FutilityPruning" => {
             if let Some(b) = parse_bool(&value) {
                 config.futility_pruning = b;
+            }
+        }
+        "Razoring" => {
+            if let Some(b) = parse_bool(&value) {
+                config.razoring = b;
             }
         }
         "Hash" => {
@@ -578,6 +587,17 @@ mod tests {
         assert!(!config.aspiration_windows);
         setopt("name AspirationWindows value true", &mut config);
         assert!(config.aspiration_windows);
+    }
+
+    #[test]
+    fn setoption_toggles_razoring() {
+        let mut config = SearchConfig::default();
+        // Razoring is experimental and defaults off — see SearchConfig::default.
+        assert!(!config.razoring);
+        setopt("name Razoring value true", &mut config);
+        assert!(config.razoring);
+        setopt("name Razoring value false", &mut config);
+        assert!(!config.razoring);
     }
 
     #[test]
