@@ -94,6 +94,10 @@ fn emit_options(config: &SearchConfig) {
         config.piece_square_tables
     ));
     emit(&format!(
+        "option name PawnStructure type check default {}",
+        config.pawn_structure
+    ));
+    emit(&format!(
         "option name KillerMoves type check default {}",
         config.killer_moves
     ));
@@ -156,6 +160,11 @@ pub fn apply_setoption(args: &str, config: &mut SearchConfig, tt: &mut Transposi
         "PieceSquareTables" => {
             if let Some(b) = parse_bool(&value) {
                 config.piece_square_tables = b;
+            }
+        }
+        "PawnStructure" => {
+            if let Some(b) = parse_bool(&value) {
+                config.pawn_structure = b;
             }
         }
         "KillerMoves" => {
@@ -547,6 +556,16 @@ mod tests {
         assert!(!config.piece_square_tables);
         setopt("name PieceSquareTables value true", &mut config);
         assert!(config.piece_square_tables);
+    }
+
+    #[test]
+    fn setoption_toggles_pawn_structure() {
+        let mut config = SearchConfig::default();
+        assert!(config.pawn_structure);
+        setopt("name PawnStructure value false", &mut config);
+        assert!(!config.pawn_structure);
+        setopt("name PawnStructure value true", &mut config);
+        assert!(config.pawn_structure);
     }
 
     #[test]

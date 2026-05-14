@@ -264,6 +264,83 @@ fn mobility(board: &Board) -> i32 {
     side_score(1, white_pieces) - side_score(7, black_pieces)
 }
 
+// Pawn-structure weights (centipawns). Doubled and isolated pawns are
+// liabilities; passed pawns are assets. The passed-pawn bonus is rank-scaled
+// (an advanced passer is far more dangerous) and phase-scaled (a passer is
+// worth roughly double in a pawn endgame, where there's nothing to stop it).
+const DOUBLED_PAWN_PENALTY: i32 = 15;
+const ISOLATED_PAWN_PENALTY: i32 = 15;
+// Indexed by the pawn's rank *from its own side's perspective*: index 1 = own
+// rank 2 (starting square), index 6 = one step from promotion. Indices 0 and 7
+// can't occur (a pawn is never on its own back rank or the promotion rank).
+const PASSED_PAWN_BONUS: [i32; 8] = [0, 5, 10, 20, 40, 70, 120, 0];
+
+const FILE_A_BB: u64 = 0x0101010101010101;
+
+fn file_bb(file: u32) -> u64 {
+    FILE_A_BB << file
+}
+
+fn adjacent_files_bb(file: u32) -> u64 {
+    let mut mask = 0_u64;
+    if file > 0 {
+        mask |= FILE_A_BB << (file - 1);
+    }
+    if file < 7 {
+        mask |= FILE_A_BB << (file + 1);
+    }
+    mask
+}
+
+/// Pawn-structure eval: doubled (penalty per extra pawn on a file), isolated
+/// (no friendly pawn on either adjacent file), and passed (no enemy pawn on
+/// the same or adjacent file ahead). Returns the white-minus-black score in
+/// centipawns. `phase` is the game phase (PHASE_MAX..0) used to amplify
+/// passers in the endgame.
+fn pawn_structure(board: &Board, phase: i32) -> i32 {
+    let white_pawns = board.bbs[0].board;
+    let black_pawns = board.bbs[6].board;
+
+    let side = |pawns: u64, enemy: u64, white: bool| -> i32 {
+        let mut score = 0_i32;
+        // Doubled: penalty for each pawn beyond the first on a file.
+        for f in 0..8 {
+            let count = (pawns & file_bb(f)).count_ones() as i32;
+            if count > 1 {
+                score -= DOUBLED_PAWN_PENALTY * (count - 1);
+            }
+        }
+        let mut bb = pawns;
+        while bb != 0 {
+            let sq = bb.trailing_zeros();
+            bb &= bb - 1;
+            let file = sq % 8;
+            let rank = sq / 8;
+            // Isolated: no friendly pawn on an adjacent file.
+            if pawns & adjacent_files_bb(file) == 0 {
+                score -= ISOLATED_PAWN_PENALTY;
+            }
+            // Passed: no enemy pawn on the same or adjacent file ahead of us.
+            let front = if white {
+                if rank == 7 { 0 } else { !0_u64 << ((rank + 1) * 8) }
+            } else if rank == 0 {
+                0
+            } else {
+                (1_u64 << (rank * 8)) - 1
+            };
+            if (file_bb(file) | adjacent_files_bb(file)) & front & enemy == 0 {
+                let own_rank = if white { rank } else { 7 - rank } as usize;
+                // 1x at full phase, scaling toward 2x as the board empties.
+                score += PASSED_PAWN_BONUS[own_rank] * (2 * PHASE_MAX - phase)
+                    / PHASE_MAX;
+            }
+        }
+        score
+    };
+
+    side(white_pawns, black_pawns, true) - side(black_pawns, white_pawns, false)
+}
+
 fn pst_value(kind: usize, sq: usize, phase: i32) -> i32 {
     let (mg, eg) = match kind {
         0 => (PAWN_MG_PST[sq], PAWN_EG_PST[sq]),
@@ -277,13 +354,18 @@ fn pst_value(kind: usize, sq: usize, phase: i32) -> i32 {
     (mg * phase + eg * (PHASE_MAX - phase)) / PHASE_MAX
 }
 
-/// Static evaluation from the side-to-move's perspective. When `use_pst` is
-/// false this is material-only; when true, piece-square table contributions
-/// are added. Decoupled from `SearchConfig` so eval can be reused without
-/// pulling in the search module's types.
-pub fn eval(board: &Board, use_pst: bool) -> i32 {
+/// Static evaluation from the side-to-move's perspective. With both flags
+/// false this is material-only; `use_pst` adds piece-square table and mobility
+/// contributions, `use_pawn_structure` adds doubled/isolated/passed-pawn
+/// terms. Decoupled from `SearchConfig` so eval can be reused without pulling
+/// in the search module's types.
+pub fn eval(board: &Board, use_pst: bool, use_pawn_structure: bool) -> i32 {
     let mut score = 0;
-    let phase = if use_pst { game_phase(board) } else { 0 };
+    let phase = if use_pst || use_pawn_structure {
+        game_phase(board)
+    } else {
+        0
+    };
     for kind in 0..6 {
         let mut bb = board.bbs[kind].board;
         while bb != 0 {
@@ -307,6 +389,9 @@ pub fn eval(board: &Board, use_pst: bool) -> i32 {
     if use_pst {
         score += mobility(board);
     }
+    if use_pawn_structure {
+        score += pawn_structure(board, phase);
+    }
     if board.side_to_move == Color::White {
         score
     } else {
@@ -321,7 +406,7 @@ mod tests {
     #[test]
     fn startpos_is_balanced_material_only() {
         let board = Board::parse("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
-        assert_eq!(eval(&board, false), 0);
+        assert_eq!(eval(&board, false, false), 0);
     }
 
     #[test]
@@ -329,19 +414,19 @@ mod tests {
         // White and black are mirror-symmetric in the start position, so PST
         // contributions must cancel exactly.
         let board = Board::parse("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
-        assert_eq!(eval(&board, true), 0);
+        assert_eq!(eval(&board, true, true), 0);
     }
 
     #[test]
     fn extra_white_queen() {
         let board = Board::parse("4k3/8/8/8/8/8/8/3QK3 w - - 0 1");
-        assert_eq!(eval(&board, false), QUEEN);
+        assert_eq!(eval(&board, false, false), QUEEN);
     }
 
     #[test]
     fn extra_white_queen_black_to_move() {
         let board = Board::parse("4k3/8/8/8/8/8/8/3QK3 b - - 0 1");
-        assert_eq!(eval(&board, false), -QUEEN);
+        assert_eq!(eval(&board, false, false), -QUEEN);
     }
 
     #[test]
@@ -349,9 +434,9 @@ mod tests {
         let center = Board::parse("4k3/8/8/8/4N3/8/8/4K3 w - - 0 1");
         let corner = Board::parse("4k3/8/8/8/8/8/8/N3K3 w - - 0 1");
         // Same material; with PST on, central knight should score strictly higher.
-        assert!(eval(&center, true) > eval(&corner, true));
+        assert!(eval(&center, true, true) > eval(&corner, true, true));
         // With PST off the positions are identical material-wise.
-        assert_eq!(eval(&center, false), eval(&corner, false));
+        assert_eq!(eval(&center, false, false), eval(&corner, false, false));
     }
 
     #[test]
@@ -374,9 +459,9 @@ mod tests {
         // corner — same material, but only positional difference is the king.
         let center = Board::parse("8/8/4k3/8/4K3/8/4P3/8 w - - 0 1");
         let corner = Board::parse("8/8/4k3/8/8/8/4P3/K7 w - - 0 1");
-        assert!(eval(&center, true) > eval(&corner, true));
+        assert!(eval(&center, true, true) > eval(&corner, true, true));
         // Material-only: identical.
-        assert_eq!(eval(&center, false), eval(&corner, false));
+        assert_eq!(eval(&center, false, false), eval(&corner, false, false));
     }
 
     #[test]
@@ -385,7 +470,7 @@ mod tests {
         // score strictly higher than a pawn still on its starting square (a2).
         let advanced = Board::parse("4k3/P7/8/8/8/8/8/4K3 w - - 0 1");
         let starting = Board::parse("4k3/8/8/8/8/8/P7/4K3 w - - 0 1");
-        assert!(eval(&advanced, true) > eval(&starting, true));
+        assert!(eval(&advanced, true, true) > eval(&starting, true, true));
     }
 
     #[test]
@@ -394,7 +479,7 @@ mod tests {
         // higher than the same rook back-ranked, with the new EG table.
         let seventh = Board::parse("4k3/R7/8/8/8/8/8/4K3 w - - 0 1");
         let first = Board::parse("4k3/8/8/8/8/8/8/R3K3 w - - 0 1");
-        assert!(eval(&seventh, true) > eval(&first, true));
+        assert!(eval(&seventh, true, true) > eval(&first, true, true));
     }
 
     #[test]
@@ -429,13 +514,61 @@ mod tests {
         let board = Board::parse("4k3/8/8/8/8/8/8/3NK3 w - - 0 1");
         let mirrored = Board::parse("3nk3/8/8/8/8/8/8/4K3 w - - 0 1");
         // White knight on d1 only.
-        let v1 = eval(&board, true);
+        let v1 = eval(&board, true, true);
         // Black knight on d8 only.
-        let v2 = eval(&mirrored, true);
+        let v2 = eval(&mirrored, true, true);
         // The boards have one knight each on mirror-image squares (different
         // colours, same relative square). Their PST contributions should be
         // exact negatives of each other (white knight side > 0, black knight
         // side < 0, mirrored across the rank axis).
         assert_eq!(v1, -v2);
+    }
+
+    #[test]
+    fn pawn_structure_penalizes_doubled_pawns() {
+        // White has doubled d-pawns; spreading them to adjacent files (still
+        // two pawns, same material) must score strictly better for white.
+        let doubled = Board::parse("4k3/4p3/8/8/8/3P4/3P4/4K3 w - - 0 1");
+        let spread = Board::parse("4k3/4p3/8/8/8/3P4/4P3/4K3 w - - 0 1");
+        assert!(eval(&spread, false, true) > eval(&doubled, false, true));
+    }
+
+    #[test]
+    fn pawn_structure_penalizes_isolated_pawns() {
+        // Two white pawns: isolated on d/f vs connected on d/e. Same material;
+        // the connected pair must score strictly better.
+        let isolated = Board::parse("4k3/8/8/8/8/8/3P1P2/4K3 w - - 0 1");
+        let connected = Board::parse("4k3/8/8/8/8/8/3PP3/4K3 w - - 0 1");
+        assert!(eval(&connected, false, true) > eval(&isolated, false, true));
+    }
+
+    #[test]
+    fn pawn_structure_rewards_passed_pawn() {
+        // White d5-pawn with the enemy pawn on d7 blocking the file: not a
+        // passer. Move the enemy pawn to a7 (same material) and nothing stops
+        // the d-pawn — it becomes a passer and white should score better.
+        let blocked = Board::parse("4k3/3p4/8/3P4/8/8/8/4K3 w - - 0 1");
+        let passer = Board::parse("4k3/p7/8/3P4/8/8/8/4K3 w - - 0 1");
+        assert!(eval(&passer, false, true) > eval(&blocked, false, true));
+    }
+
+    #[test]
+    fn passed_pawn_bonus_amplified_in_endgame() {
+        // The same passed pawn is worth more at phase 0 (pure endgame) than at
+        // PHASE_MAX (full middlegame).
+        let board = Board::parse("4k3/8/8/3P4/8/8/8/4K3 w - - 0 1");
+        let eg = pawn_structure(&board, 0);
+        let mg = pawn_structure(&board, PHASE_MAX);
+        assert!(eg > mg, "passer in EG ({}) should beat MG ({})", eg, mg);
+    }
+
+    #[test]
+    fn pawn_structure_toggle_changes_score() {
+        // With the toggle off, the doubled-pawn penalty disappears.
+        let doubled = Board::parse("4k3/4p3/8/8/8/3P4/3P4/4K3 w - - 0 1");
+        assert_ne!(
+            eval(&doubled, false, true),
+            eval(&doubled, false, false)
+        );
     }
 }

@@ -72,6 +72,7 @@ pub struct SearchConfig {
     pub iterative_deepening: bool,
     pub transposition_table: bool,
     pub piece_square_tables: bool,
+    pub pawn_structure: bool,
     pub killer_moves: bool,
     pub mid_search_abort: bool,
     pub null_move_pruning: bool,
@@ -89,6 +90,7 @@ impl Default for SearchConfig {
             iterative_deepening: true,
             transposition_table: true,
             piece_square_tables: true,
+            pawn_structure: true,
             killer_moves: true,
             mid_search_abort: true,
             null_move_pruning: true,
@@ -439,7 +441,7 @@ fn negamax(
         return if config.quiescence {
             qsearch(board, alpha, beta, ply, config, abort, nodes)
         } else {
-            eval(board, config.piece_square_tables)
+            eval(board, config.piece_square_tables, config.pawn_structure)
         };
     }
 
@@ -462,7 +464,7 @@ fn negamax(
         && in_safe_window
     {
         let se = *static_eval
-            .get_or_insert_with(|| eval(board, config.piece_square_tables));
+            .get_or_insert_with(|| eval(board, config.piece_square_tables, config.pawn_structure));
         if se + razor_margin(depth) < alpha {
             let score = qsearch(board, alpha, beta, ply, config, abort, nodes);
             if config.mid_search_abort && abort.fire() {
@@ -535,7 +537,7 @@ fn negamax(
         && in_safe_window
         && {
             let se = *static_eval
-                .get_or_insert_with(|| eval(board, config.piece_square_tables));
+                .get_or_insert_with(|| eval(board, config.piece_square_tables, config.pawn_structure));
             se + futility_margin(depth) <= alpha
         };
 
@@ -685,7 +687,7 @@ fn qsearch(
     {
         return 0;
     }
-    let stand_pat = eval(board, config.piece_square_tables);
+    let stand_pat = eval(board, config.piece_square_tables, config.pawn_structure);
     if stand_pat >= beta {
         return beta;
     }

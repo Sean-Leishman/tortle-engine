@@ -111,19 +111,21 @@ Currently:
 - `transposition_table: bool` (default `true`) — caches `(zobrist_hash, depth, score, bound, best_move)` per position in a fixed-size hash table. At each node, probes for a usable hit (sufficient depth + bound consistent with the alpha/beta window) and short-circuits if so. The TT move is always used as the move-ordering hint, even on insufficient-depth hits. Mate scores are stored as distance-from-this-node and restored to distance-from-root on probe via `store_mate_score` / `retrieve_mate_score`. Toggle via `setoption name TranspositionTable value <true|false>`.
   - Default size 16 MB (rounded down to a power-of-two number of `Option<TTEntry>` slots). Cleared on `ucinewgame`. Hash is computed from scratch each node (no incremental update yet).
   - Empirical speedup on kiwipete depth-6: 7520ms → 3395ms (~2.2×). Identical best score and PV. Saving compounds with ID — earlier iterations populate the TT so deeper iterations can reuse cached subtrees and PV moves.
-- `piece_square_tables: bool` (default `true`) — adds per-square positional bonuses on top of material in `eval`. Six tables (P/N/B/R/Q/K-middlegame) in `eval.rs`. Toggle via `setoption name PieceSquareTables value <true|false>`.
+- `piece_square_tables: bool` (default `true`) — adds per-square positional bonuses (tapered MG/EG PSTs) plus mobility on top of material in `eval`. Toggle via `setoption name PieceSquareTables value <true|false>`.
   - Qualitative impact: with PST on, the engine plays `b1c3` from startpos (knight development); with PST off, it plays `a2a3` (the first move enumerated, no positional reason to prefer anything).
+- `pawn_structure: bool` (default `true`) — adds doubled (−15 cp per extra pawn on a file), isolated (−15 cp), and passed-pawn terms to `eval`. The passed-pawn bonus is rank-scaled and phase-scaled (~2× in a pure pawn endgame). Toggle via `setoption name PawnStructure value <true|false>`.
 
 Not implemented yet (each will get its own toggle): killers/history, null-move pruning, late-move reductions, incremental Zobrist hashing, TT size as a UCI `Hash` spin option, endgame king PST + tapered eval.
 
 ## Evaluation
 
-`torte/search/eval.rs` — `eval(&Board, use_pst: bool) -> i32` returns a centipawn score from the side-to-move's perspective.
+`torte/search/eval.rs` — `eval(&Board, use_pst: bool, use_pawn_structure: bool) -> i32` returns a centipawn score from the side-to-move's perspective.
 
 - **Material**: P=100, N=320, B=330, R=500, Q=900, K=0. Exposed as `PIECE_VALUES` for the MVV-LVA code.
-- **Piece-square tables** (when `use_pst` is true): per-piece 64-entry `i32` arrays from white's perspective, indexed so `PST[0] = a1`. Black pieces look up `PST[sq ^ 56]` to mirror the rank. Six tables: pawn, knight, bishop, rook, queen, king-middlegame. No tapered eval (separate endgame king table) yet, no mobility, no king-safety pawn-shield, no pawn structure.
+- **Piece-square tables** (when `use_pst` is true): per-piece 64-entry `i32` arrays from white's perspective, indexed so `PST[0] = a1`. Black pieces look up `PST[sq ^ 56]` to mirror the rank. Tables are tapered: separate MG/EG arrays for each piece, lerped by game phase. Mobility (per-piece move counts, weighted) is added in the same `use_pst` branch. No king-safety pawn-shield yet.
+- **Pawn structure** (when `use_pawn_structure` is true): doubled (penalty per extra pawn on a file), isolated (no friendly pawn on an adjacent file), and passed (no enemy pawn on the same/adjacent file ahead). The passed-pawn bonus is rank-scaled and phase-scaled to ~2× in a pure pawn endgame.
 
-The toggle lives on `SearchConfig` as `piece_square_tables` (default `true`). `eval` itself takes a `bool` directly to avoid pulling `SearchConfig` into the eval module — callers (`negamax`, `qsearch`) forward `config.piece_square_tables`.
+The toggles live on `SearchConfig` as `piece_square_tables` and `pawn_structure` (both default `true`). `eval` itself takes plain `bool`s to avoid pulling `SearchConfig` into the eval module — callers (`negamax`, `qsearch`) forward `config.piece_square_tables` and `config.pawn_structure`.
 
 ## REPL search command
 

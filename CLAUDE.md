@@ -84,7 +84,8 @@ REPL conveniences alongside UCI: `d`/`board` prints the position + current `Sear
 | `Quiescence`          | true    | Recursive capture search at leaves; fixes horizon effect |
 | `IterativeDeepening`  | true    | Searches depths 1..max with deadline aborts and per-depth info |
 | `TranspositionTable`  | true    | 16 MB Zobrist-keyed cache; ~2.2× speedup at kiwipete d6 |
-| `PieceSquareTables`   | true    | Positional bonuses; makes opening play actually look like chess |
+| `PieceSquareTables`   | true    | Positional bonuses (tapered PSTs + mobility); makes opening play actually look like chess |
+| `PawnStructure`       | true    | Doubled/isolated penalties + rank-and-phase-scaled passed-pawn bonus |
 
 ## Gaps / known limitations
 
@@ -100,6 +101,7 @@ REPL conveniences alongside UCI: `d`/`board` prints the position + current `Sear
 
 A running journal of substantial changes, newest at the top. Each entry should reference its `jj` commit and note: what changed, *why* (the intent), and any visible side-effect (test count, perf number, qualitative play difference). Don't log mechanical refactors or single-line typo fixes.
 
+- **2026-05-14 — eval: pawn structure (toggleable)** — `pawn_structure()` in `eval.rs`: doubled (−15 cp per extra pawn on a file), isolated (−15 cp, no friendly pawn on adjacent files), passed (rank-scaled `PASSED_PAWN_BONUS`, phase-scaled to ~2× in a pure pawn endgame). `eval` signature changed to `eval(board, use_pst, use_pawn_structure)`. New toggle `PawnStructure` (default on). Pairs with the tapered pawn EG table — passers get amplified exactly where they matter. (6 new tests, 108 total.)
 - **2026-05-11 — eval+search: piece-square tables (toggleable)** — added 6 PST arrays (P/N/B/R/Q/K-mg) in `eval.rs`; black pieces look up `PST[sq ^ 56]` to mirror rank. New toggle `PieceSquareTables` (default on). Qualitative effect: engine plays `1. Nc3` from startpos instead of `1. a3`. (4 new tests, 69 total.)
 - **2026-05-11 — search: transposition table (toggleable)** — `transposition.rs` with Zobrist keys (seeded xorshift, lazy `OnceLock`), `TTEntry { key, score, best_move, depth, bound }`, power-of-two-sized table. Mate scores adjusted by ply on store/retrieve. TT move used as PV-first ordering hint. New toggle `TranspositionTable` (default on); cleared on `ucinewgame`. ~2.2× speedup on kiwipete d6 (7520ms → 3395ms), same best move. (13 new tests.)
 - **2026-05-11 — search: iterative deepening + UCI time controls** — `iterative_deepening` loops depths 1..=max with a deadline; short-circuits on mate. New `GoArgs { max_depth, time_budget_ms }` from `parse_go` handles `depth N`, `movetime ms`, `wtime/btime/winc/binc`. New toggle `IterativeDeepening` (default on). Mid-iteration abort isn't supported yet. (9 new tests.)
@@ -127,4 +129,4 @@ These are the next likely toggles, drawn from the strong-engine playbook:
 6. **Mid-search abort** — let `stop` and time deadline interrupt within an iteration (atomic flag checked at every node).
 7. **Aspiration windows** — narrow alpha/beta windows around the previous ID iteration's score; fall back on fail-high/low. Combines well with TT.
 
-Then: mobility eval, pawn structure (doubled/isolated/passed), king-safety pawn shield, LMR (late-move reductions), futility/razoring, MultiPV.
+Then: king-safety pawn shield, bishop-pair bonus, late move pruning (LMP), MultiPV.
