@@ -341,6 +341,66 @@ fn pawn_structure(board: &Board, phase: i32) -> i32 {
     side(white_pawns, black_pawns, true) - side(black_pawns, white_pawns, false)
 }
 
+/// Bonus in centipawns for holding both bishops. The pair covers both square
+/// colours and is worth more than two knights in most positions, so it earns
+/// a flat bump beyond the per-piece material values.
+const BISHOP_PAIR_BONUS: i32 = 30;
+
+/// Bishop-pair eval: `+BISHOP_PAIR_BONUS` if white has two or more bishops,
+/// `-BISHOP_PAIR_BONUS` if black does. White-minus-black, in centipawns.
+fn bishop_pair(board: &Board) -> i32 {
+    let mut score = 0;
+    if board.bbs[2].board.count_ones() >= 2 {
+        score += BISHOP_PAIR_BONUS;
+    }
+    if board.bbs[8].board.count_ones() >= 2 {
+        score -= BISHOP_PAIR_BONUS;
+    }
+    score
+}
+
+// King-safety pawn shield. A castled king wants friendly pawns on the three
+// files around it: a pawn still on its 2nd rank (directly sheltering the king)
+// is worth more than one that has advanced a square and left a gap behind it.
+const SHIELD_PAWN_HOME: i32 = 12;
+const SHIELD_PAWN_ADVANCED: i32 = 6;
+
+/// King-safety eval: rewards an intact pawn shield in front of a king that is
+/// still on its back rank (plausibly castled). White-minus-black, in
+/// centipawns, and phase-scaled — the shield matters in the middlegame and
+/// fades to nothing in the endgame, where the king should be active instead.
+fn king_safety(board: &Board, phase: i32) -> i32 {
+    let side = |king_bb: u64, pawns: u64, white: bool| -> i32 {
+        if king_bb == 0 {
+            return 0;
+        }
+        let ksq = king_bb.trailing_zeros();
+        let krank = ksq / 8;
+        let kfile = ksq % 8;
+        // Only score a shield for a king still on its home rank — a king that
+        // has marched up the board isn't sheltering behind pawns.
+        let home_rank = if white { 0 } else { 7 };
+        if krank != home_rank {
+            return 0;
+        }
+        let (home_pawn_rank, advanced_pawn_rank) = if white { (1, 2) } else { (6, 5) };
+        let lo = kfile.saturating_sub(1);
+        let hi = (kfile + 1).min(7);
+        let mut score = 0;
+        for f in lo..=hi {
+            if pawns & (1_u64 << (home_pawn_rank * 8 + f)) != 0 {
+                score += SHIELD_PAWN_HOME;
+            } else if pawns & (1_u64 << (advanced_pawn_rank * 8 + f)) != 0 {
+                score += SHIELD_PAWN_ADVANCED;
+            }
+        }
+        score
+    };
+    let raw = side(board.bbs[5].board, board.bbs[0].board, true)
+        - side(board.bbs[11].board, board.bbs[6].board, false);
+    raw * phase / PHASE_MAX
+}
+
 fn pst_value(kind: usize, sq: usize, phase: i32) -> i32 {
     let (mg, eg) = match kind {
         0 => (PAWN_MG_PST[sq], PAWN_EG_PST[sq]),
@@ -354,24 +414,58 @@ fn pst_value(kind: usize, sq: usize, phase: i32) -> i32 {
     (mg * phase + eg * (PHASE_MAX - phase)) / PHASE_MAX
 }
 
-/// Static evaluation from the side-to-move's perspective. With both flags
-/// false this is material-only; `use_pst` adds piece-square table and mobility
-/// contributions, `use_pawn_structure` adds doubled/isolated/passed-pawn
-/// terms. Decoupled from `SearchConfig` so eval can be reused without pulling
-/// in the search module's types.
-pub fn eval(board: &Board, use_pst: bool, use_pawn_structure: bool) -> i32 {
+/// Which evaluation terms are active. Defined here (not in `search`) so `eval`
+/// stays decoupled from `SearchConfig` — `search` builds one of these from its
+/// own config. All-false is a pure material eval.
+#[derive(Clone, Copy, Debug)]
+pub struct EvalConfig {
+    /// Tapered piece-square tables + mobility.
+    pub piece_square_tables: bool,
+    /// Doubled / isolated / passed-pawn terms.
+    pub pawn_structure: bool,
+    /// Flat bonus for holding both bishops.
+    pub bishop_pair: bool,
+    /// Pawn-shield bonus for a castled king (phase-scaled).
+    pub king_safety: bool,
+}
+
+impl EvalConfig {
+    /// Material only — every positional term off.
+    pub fn material_only() -> Self {
+        Self {
+            piece_square_tables: false,
+            pawn_structure: false,
+            bishop_pair: false,
+            king_safety: false,
+        }
+    }
+
+    /// Every positional term on.
+    pub fn all() -> Self {
+        Self {
+            piece_square_tables: true,
+            pawn_structure: true,
+            bishop_pair: true,
+            king_safety: true,
+        }
+    }
+}
+
+/// Static evaluation from the side-to-move's perspective. With `EvalConfig::
+/// material_only()` this is a pure material count; each `EvalConfig` flag
+/// layers on its positional term. Decoupled from `SearchConfig` so eval can be
+/// reused without pulling in the search module's types.
+pub fn eval(board: &Board, cfg: EvalConfig) -> i32 {
     let mut score = 0;
-    let phase = if use_pst || use_pawn_structure {
-        game_phase(board)
-    } else {
-        0
-    };
+    let needs_phase =
+        cfg.piece_square_tables || cfg.pawn_structure || cfg.king_safety;
+    let phase = if needs_phase { game_phase(board) } else { 0 };
     for kind in 0..6 {
         let mut bb = board.bbs[kind].board;
         while bb != 0 {
             let sq = bb.trailing_zeros() as usize;
             score += PIECE_VALUES[kind];
-            if use_pst {
+            if cfg.piece_square_tables {
                 score += pst_value(kind, sq, phase);
             }
             bb &= bb - 1;
@@ -380,17 +474,23 @@ pub fn eval(board: &Board, use_pst: bool, use_pawn_structure: bool) -> i32 {
         while bb != 0 {
             let sq = bb.trailing_zeros() as usize;
             score -= PIECE_VALUES[kind];
-            if use_pst {
+            if cfg.piece_square_tables {
                 score -= pst_value(kind, sq ^ 56, phase);
             }
             bb &= bb - 1;
         }
     }
-    if use_pst {
+    if cfg.piece_square_tables {
         score += mobility(board);
     }
-    if use_pawn_structure {
+    if cfg.pawn_structure {
         score += pawn_structure(board, phase);
+    }
+    if cfg.bishop_pair {
+        score += bishop_pair(board);
+    }
+    if cfg.king_safety {
+        score += king_safety(board, phase);
     }
     if board.side_to_move == Color::White {
         score
@@ -403,10 +503,35 @@ pub fn eval(board: &Board, use_pst: bool, use_pawn_structure: bool) -> i32 {
 mod tests {
     use super::*;
 
+    /// Material eval plus only the pawn-structure term — for the
+    /// structure-specific tests that want to isolate it.
+    fn pawn_only() -> EvalConfig {
+        EvalConfig {
+            pawn_structure: true,
+            ..EvalConfig::material_only()
+        }
+    }
+
+    /// Material eval plus only the bishop-pair term.
+    fn bishop_pair_only() -> EvalConfig {
+        EvalConfig {
+            bishop_pair: true,
+            ..EvalConfig::material_only()
+        }
+    }
+
+    /// Material eval plus only the king-safety term.
+    fn king_safety_only() -> EvalConfig {
+        EvalConfig {
+            king_safety: true,
+            ..EvalConfig::material_only()
+        }
+    }
+
     #[test]
     fn startpos_is_balanced_material_only() {
         let board = Board::parse("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
-        assert_eq!(eval(&board, false, false), 0);
+        assert_eq!(eval(&board, EvalConfig::material_only()), 0);
     }
 
     #[test]
@@ -414,19 +539,19 @@ mod tests {
         // White and black are mirror-symmetric in the start position, so PST
         // contributions must cancel exactly.
         let board = Board::parse("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
-        assert_eq!(eval(&board, true, true), 0);
+        assert_eq!(eval(&board, EvalConfig::all()), 0);
     }
 
     #[test]
     fn extra_white_queen() {
         let board = Board::parse("4k3/8/8/8/8/8/8/3QK3 w - - 0 1");
-        assert_eq!(eval(&board, false, false), QUEEN);
+        assert_eq!(eval(&board, EvalConfig::material_only()), QUEEN);
     }
 
     #[test]
     fn extra_white_queen_black_to_move() {
         let board = Board::parse("4k3/8/8/8/8/8/8/3QK3 b - - 0 1");
-        assert_eq!(eval(&board, false, false), -QUEEN);
+        assert_eq!(eval(&board, EvalConfig::material_only()), -QUEEN);
     }
 
     #[test]
@@ -434,9 +559,12 @@ mod tests {
         let center = Board::parse("4k3/8/8/8/4N3/8/8/4K3 w - - 0 1");
         let corner = Board::parse("4k3/8/8/8/8/8/8/N3K3 w - - 0 1");
         // Same material; with PST on, central knight should score strictly higher.
-        assert!(eval(&center, true, true) > eval(&corner, true, true));
+        assert!(eval(&center, EvalConfig::all()) > eval(&corner, EvalConfig::all()));
         // With PST off the positions are identical material-wise.
-        assert_eq!(eval(&center, false, false), eval(&corner, false, false));
+        assert_eq!(
+            eval(&center, EvalConfig::material_only()),
+            eval(&corner, EvalConfig::material_only())
+        );
     }
 
     #[test]
@@ -459,9 +587,12 @@ mod tests {
         // corner — same material, but only positional difference is the king.
         let center = Board::parse("8/8/4k3/8/4K3/8/4P3/8 w - - 0 1");
         let corner = Board::parse("8/8/4k3/8/8/8/4P3/K7 w - - 0 1");
-        assert!(eval(&center, true, true) > eval(&corner, true, true));
+        assert!(eval(&center, EvalConfig::all()) > eval(&corner, EvalConfig::all()));
         // Material-only: identical.
-        assert_eq!(eval(&center, false, false), eval(&corner, false, false));
+        assert_eq!(
+            eval(&center, EvalConfig::material_only()),
+            eval(&corner, EvalConfig::material_only())
+        );
     }
 
     #[test]
@@ -470,7 +601,7 @@ mod tests {
         // score strictly higher than a pawn still on its starting square (a2).
         let advanced = Board::parse("4k3/P7/8/8/8/8/8/4K3 w - - 0 1");
         let starting = Board::parse("4k3/8/8/8/8/8/P7/4K3 w - - 0 1");
-        assert!(eval(&advanced, true, true) > eval(&starting, true, true));
+        assert!(eval(&advanced, EvalConfig::all()) > eval(&starting, EvalConfig::all()));
     }
 
     #[test]
@@ -479,7 +610,7 @@ mod tests {
         // higher than the same rook back-ranked, with the new EG table.
         let seventh = Board::parse("4k3/R7/8/8/8/8/8/4K3 w - - 0 1");
         let first = Board::parse("4k3/8/8/8/8/8/8/R3K3 w - - 0 1");
-        assert!(eval(&seventh, true, true) > eval(&first, true, true));
+        assert!(eval(&seventh, EvalConfig::all()) > eval(&first, EvalConfig::all()));
     }
 
     #[test]
@@ -514,9 +645,9 @@ mod tests {
         let board = Board::parse("4k3/8/8/8/8/8/8/3NK3 w - - 0 1");
         let mirrored = Board::parse("3nk3/8/8/8/8/8/8/4K3 w - - 0 1");
         // White knight on d1 only.
-        let v1 = eval(&board, true, true);
+        let v1 = eval(&board, EvalConfig::all());
         // Black knight on d8 only.
-        let v2 = eval(&mirrored, true, true);
+        let v2 = eval(&mirrored, EvalConfig::all());
         // The boards have one knight each on mirror-image squares (different
         // colours, same relative square). Their PST contributions should be
         // exact negatives of each other (white knight side > 0, black knight
@@ -530,7 +661,7 @@ mod tests {
         // two pawns, same material) must score strictly better for white.
         let doubled = Board::parse("4k3/4p3/8/8/8/3P4/3P4/4K3 w - - 0 1");
         let spread = Board::parse("4k3/4p3/8/8/8/3P4/4P3/4K3 w - - 0 1");
-        assert!(eval(&spread, false, true) > eval(&doubled, false, true));
+        assert!(eval(&spread, pawn_only()) > eval(&doubled, pawn_only()));
     }
 
     #[test]
@@ -539,7 +670,7 @@ mod tests {
         // the connected pair must score strictly better.
         let isolated = Board::parse("4k3/8/8/8/8/8/3P1P2/4K3 w - - 0 1");
         let connected = Board::parse("4k3/8/8/8/8/8/3PP3/4K3 w - - 0 1");
-        assert!(eval(&connected, false, true) > eval(&isolated, false, true));
+        assert!(eval(&connected, pawn_only()) > eval(&isolated, pawn_only()));
     }
 
     #[test]
@@ -549,7 +680,7 @@ mod tests {
         // the d-pawn — it becomes a passer and white should score better.
         let blocked = Board::parse("4k3/3p4/8/3P4/8/8/8/4K3 w - - 0 1");
         let passer = Board::parse("4k3/p7/8/3P4/8/8/8/4K3 w - - 0 1");
-        assert!(eval(&passer, false, true) > eval(&blocked, false, true));
+        assert!(eval(&passer, pawn_only()) > eval(&blocked, pawn_only()));
     }
 
     #[test]
@@ -567,8 +698,67 @@ mod tests {
         // With the toggle off, the doubled-pawn penalty disappears.
         let doubled = Board::parse("4k3/4p3/8/8/8/3P4/3P4/4K3 w - - 0 1");
         assert_ne!(
-            eval(&doubled, false, true),
-            eval(&doubled, false, false)
+            eval(&doubled, pawn_only()),
+            eval(&doubled, EvalConfig::material_only())
         );
+    }
+
+    #[test]
+    fn bishop_pair_detects_two_bishops() {
+        let white_pair = Board::parse("4k3/8/8/8/8/8/8/2B1KB2 w - - 0 1");
+        assert_eq!(bishop_pair(&white_pair), BISHOP_PAIR_BONUS);
+        let black_pair = Board::parse("2b1kb2/8/8/8/8/8/8/4K3 w - - 0 1");
+        assert_eq!(bishop_pair(&black_pair), -BISHOP_PAIR_BONUS);
+        // One bishop each: no pair on either side.
+        let one_each = Board::parse("4kb2/8/8/8/8/8/8/2B1K3 w - - 0 1");
+        assert_eq!(bishop_pair(&one_each), 0);
+    }
+
+    #[test]
+    fn bishop_pair_reflected_in_eval() {
+        // White holds both bishops; enabling the term lifts eval by exactly
+        // the bonus over the material-only score.
+        let board = Board::parse("4k3/8/8/8/8/8/8/2B1KB2 w - - 0 1");
+        let with = eval(&board, bishop_pair_only());
+        let without = eval(&board, EvalConfig::material_only());
+        assert_eq!(with - without, BISHOP_PAIR_BONUS);
+    }
+
+    #[test]
+    fn king_safety_rewards_intact_pawn_shield() {
+        // White king castled on g1 with the f/g/h pawns intact scores better
+        // than the same king with no shield at all.
+        let sheltered = Board::parse("4k3/8/8/8/8/8/5PPP/6K1 w - - 0 1");
+        let exposed = Board::parse("4k3/8/8/8/8/8/8/6K1 w - - 0 1");
+        assert!(
+            king_safety(&sheltered, PHASE_MAX) > king_safety(&exposed, PHASE_MAX)
+        );
+    }
+
+    #[test]
+    fn king_safety_fades_in_endgame() {
+        // The shield bonus is full at PHASE_MAX and gone at phase 0.
+        let board = Board::parse("4k3/8/8/8/8/8/5PPP/6K1 w - - 0 1");
+        assert!(king_safety(&board, PHASE_MAX) > king_safety(&board, 0));
+        assert_eq!(king_safety(&board, 0), 0);
+    }
+
+    #[test]
+    fn king_safety_ignores_king_off_home_rank() {
+        // A king that has left its back rank gets no shield bonus even with
+        // pawns alongside it.
+        let marched = Board::parse("4k3/8/8/8/8/5PPP/6K1/8 w - - 0 1");
+        assert_eq!(king_safety(&marched, PHASE_MAX), 0);
+    }
+
+    #[test]
+    fn king_safety_reflected_in_eval() {
+        // Rooks on a1/a8 keep the game phase above zero (king safety fades to
+        // nothing at phase 0); material stays symmetric, so the only eval
+        // difference is white's intact pawn shield.
+        let board = Board::parse("r3k3/8/8/8/8/8/5PPP/R5K1 w - - 0 1");
+        let with = eval(&board, king_safety_only());
+        let without = eval(&board, EvalConfig::material_only());
+        assert!(with > without);
     }
 }

@@ -1,0 +1,10 @@
+# Build trees and binaries — reproduce via README.md, don't commit.
+fastchess-src/
+sungorus-src/
+vice-src/
+fastchess
+engines/
+books/
+results/
+
+# Tracked: run-ladder.sh, README.md, .gitignore

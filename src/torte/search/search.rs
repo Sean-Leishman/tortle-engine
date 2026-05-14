@@ -2,7 +2,7 @@ use crate::torte::board::board::Board;
 use crate::torte::board::pieces::Color;
 use crate::torte::core::piece_move::Move;
 use crate::torte::movegen::generator::{generate_legal_moves, is_attacked, king_square};
-use crate::torte::search::eval::{eval, PIECE_VALUES};
+use crate::torte::search::eval::{eval, EvalConfig, PIECE_VALUES};
 use crate::torte::search::transposition::{Bound, TTEntry, TranspositionTable};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -21,6 +21,22 @@ pub type KillerTable = [[Option<Move>; 2]; MAX_PLY];
 pub fn new_killers() -> KillerTable {
     [[None; 2]; MAX_PLY]
 }
+
+/// History heuristic table, indexed `[side][from][to]`. Each quiet move that
+/// causes a beta cutoff has its slot bumped by `depth²`, so moves that have
+/// historically been good get ordered earlier even when they aren't killers
+/// at the current ply. Unlike killers this is *not* ply-indexed — the signal
+/// is "this from→to move tends to be strong" regardless of where in the tree.
+pub type HistoryTable = [[[i32; 64]; 64]; 2];
+
+pub fn new_history() -> Box<HistoryTable> {
+    Box::new([[[0; 64]; 64]; 2])
+}
+
+/// Cap on a single history slot. Bounds the ordering key's range (so it stays
+/// in its band between killers and zero-history quiets) and prevents unbounded
+/// growth over a long search.
+const HISTORY_MAX: i32 = 1 << 20;
 
 /// Combined "stop searching" signal: a wall-clock deadline and/or an atomic
 /// flag (typically set by UCI `stop`). Checked inside negamax/qsearch when the
@@ -73,7 +89,10 @@ pub struct SearchConfig {
     pub transposition_table: bool,
     pub piece_square_tables: bool,
     pub pawn_structure: bool,
+    pub bishop_pair: bool,
+    pub king_safety: bool,
     pub killer_moves: bool,
+    pub history_heuristic: bool,
     pub mid_search_abort: bool,
     pub null_move_pruning: bool,
     pub aspiration_windows: bool,
@@ -91,7 +110,10 @@ impl Default for SearchConfig {
             transposition_table: true,
             piece_square_tables: true,
             pawn_structure: true,
+            bishop_pair: true,
+            king_safety: true,
             killer_moves: true,
+            history_heuristic: true,
             mid_search_abort: true,
             null_move_pruning: true,
             aspiration_windows: true,
@@ -100,6 +122,18 @@ impl Default for SearchConfig {
             // Razoring is off by default — see RAZOR_MAX_DEPTH note. Toggle
             // on via `setoption name Razoring value true` for experiments.
             razoring: false,
+        }
+    }
+}
+
+impl SearchConfig {
+    /// Project the eval-related toggles onto an `EvalConfig` for `eval`.
+    pub fn eval_config(&self) -> EvalConfig {
+        EvalConfig {
+            piece_square_tables: self.piece_square_tables,
+            pawn_structure: self.pawn_structure,
+            bishop_pair: self.bishop_pair,
+            king_safety: self.king_safety,
         }
     }
 }
@@ -185,7 +219,16 @@ pub fn find_best_move_with(
 ) -> Option<(Move, i32)> {
     let mut tt = TranspositionTable::default_size();
     let mut killers = new_killers();
-    find_best_move_with_tt(board, depth, config, &mut tt, &mut killers, &AbortSignal::never())
+    let mut history = new_history();
+    find_best_move_with_tt(
+        board,
+        depth,
+        config,
+        &mut tt,
+        &mut killers,
+        &mut history,
+        &AbortSignal::never(),
+    )
 }
 
 /// Search progressively at depths 1..=max_depth. Allocates a fresh TT;
@@ -242,16 +285,19 @@ where
 {
     let start = Instant::now();
     let mut last_best: Option<(Move, i32)> = None;
-    // Killers persist across ID iterations: a quiet move that caused a cutoff
-    // at depth N-1 is still a promising candidate at depth N.
+    // Killers and history persist across ID iterations: a quiet move that
+    // caused a cutoff at depth N-1 is still a promising candidate at depth N.
     let mut killers = new_killers();
+    let mut history = new_history();
 
     for d in 1..=max_depth {
         if abort.fire() {
             break;
         }
 
-        let result = search_one_iteration(board, d, &last_best, config, tt, &mut killers, &abort);
+        let result = search_one_iteration(
+            board, d, &last_best, config, tt, &mut killers, &mut history, &abort,
+        );
         // If the iteration was interrupted mid-flight, its result is unreliable —
         // discard it and fall back to the deepest fully-completed iteration.
         if abort.fire() {
@@ -283,25 +329,27 @@ fn search_one_iteration(
     config: SearchConfig,
     tt: &mut TranspositionTable,
     killers: &mut KillerTable,
+    history: &mut HistoryTable,
     abort: &AbortSignal,
 ) -> Option<(Move, i32)> {
     if !config.aspiration_windows || depth < ASPIRATION_MIN_DEPTH {
-        return find_best_move_with_tt(board, depth, config, tt, killers, abort);
+        return find_best_move_with_tt(board, depth, config, tt, killers, history, abort);
     }
     let prev_score = match *last_best {
         Some((_, s)) if s.abs() < MATE_SCORE - 1000 => s,
         // First iteration or near-mate score: no useful window to narrow to.
-        _ => return find_best_move_with_tt(board, depth, config, tt, killers, abort),
+        _ => return find_best_move_with_tt(board, depth, config, tt, killers, history, abort),
     };
 
     let alpha = prev_score - ASPIRATION_DELTA;
     let beta = prev_score + ASPIRATION_DELTA;
-    let result = find_best_move_with_window(board, depth, alpha, beta, config, tt, killers, abort)?;
+    let result =
+        find_best_move_with_window(board, depth, alpha, beta, config, tt, killers, history, abort)?;
     let (_, score) = result;
     if score <= alpha || score >= beta {
         // Fail high/low: the true score lies outside our guess. Re-search at
         // full width to get the correct best move and score.
-        find_best_move_with_tt(board, depth, config, tt, killers, abort)
+        find_best_move_with_tt(board, depth, config, tt, killers, history, abort)
     } else {
         Some(result)
     }
@@ -313,9 +361,12 @@ pub fn find_best_move_with_tt(
     config: SearchConfig,
     tt: &mut TranspositionTable,
     killers: &mut KillerTable,
+    history: &mut HistoryTable,
     abort: &AbortSignal,
 ) -> Option<(Move, i32)> {
-    find_best_move_with_window(board, depth, -INFINITY, INFINITY, config, tt, killers, abort)
+    find_best_move_with_window(
+        board, depth, -INFINITY, INFINITY, config, tt, killers, history, abort,
+    )
 }
 
 /// Root search with a caller-supplied `[alpha, beta]` window. Used by
@@ -331,6 +382,7 @@ pub fn find_best_move_with_window(
     config: SearchConfig,
     tt: &mut TranspositionTable,
     killers: &mut KillerTable,
+    history: &mut HistoryTable,
     abort: &AbortSignal,
 ) -> Option<(Move, i32)> {
     let mut moves = generate_legal_moves(board);
@@ -348,7 +400,7 @@ pub fn find_best_move_with_window(
     };
 
     if config.move_ordering {
-        order_moves(board, &mut moves, tt_move, killer_slice(killers, 0, config));
+        order_moves(board, &mut moves, tt_move, killer_slice(killers, 0, config), history);
     }
 
     let depth = depth.max(1);
@@ -371,6 +423,7 @@ pub fn find_best_move_with_window(
             config,
             tt,
             killers,
+            history,
             abort,
             &mut nodes,
         );
@@ -407,6 +460,7 @@ fn negamax(
     config: SearchConfig,
     tt: &mut TranspositionTable,
     killers: &mut KillerTable,
+    history: &mut HistoryTable,
     abort: &AbortSignal,
     nodes: &mut u64,
 ) -> i32 {
@@ -439,9 +493,9 @@ fn negamax(
 
     if depth == 0 {
         return if config.quiescence {
-            qsearch(board, alpha, beta, ply, config, abort, nodes)
+            qsearch(board, alpha, beta, ply, config, history, abort, nodes)
         } else {
-            eval(board, config.piece_square_tables, config.pawn_structure)
+            eval(board, config.eval_config())
         };
     }
 
@@ -464,9 +518,9 @@ fn negamax(
         && in_safe_window
     {
         let se = *static_eval
-            .get_or_insert_with(|| eval(board, config.piece_square_tables, config.pawn_structure));
+            .get_or_insert_with(|| eval(board, config.eval_config()));
         if se + razor_margin(depth) < alpha {
-            let score = qsearch(board, alpha, beta, ply, config, abort, nodes);
+            let score = qsearch(board, alpha, beta, ply, config, history, abort, nodes);
             if config.mid_search_abort && abort.fire() {
                 return alpha;
             }
@@ -505,6 +559,7 @@ fn negamax(
             config,
             tt,
             killers,
+            history,
             abort,
             nodes,
         );
@@ -521,7 +576,7 @@ fn negamax(
         return terminal_score(board, ply);
     }
     if config.move_ordering {
-        order_moves(board, &mut moves, tt_move, killer_slice(killers, ply, config));
+        order_moves(board, &mut moves, tt_move, killer_slice(killers, ply, config), history);
     }
 
     let mut best_move = moves[0];
@@ -537,7 +592,7 @@ fn negamax(
         && in_safe_window
         && {
             let se = *static_eval
-                .get_or_insert_with(|| eval(board, config.piece_square_tables, config.pawn_structure));
+                .get_or_insert_with(|| eval(board, config.eval_config()));
             se + futility_margin(depth) <= alpha
         };
 
@@ -567,6 +622,7 @@ fn negamax(
                 config,
                 tt,
                 killers,
+                history,
                 abort,
                 nodes,
             )
@@ -580,6 +636,7 @@ fn negamax(
                 config,
                 tt,
                 killers,
+                history,
                 abort,
                 nodes,
             )
@@ -596,6 +653,7 @@ fn negamax(
                 config,
                 tt,
                 killers,
+                history,
                 abort,
                 nodes,
             );
@@ -605,11 +663,21 @@ fn negamax(
         }
 
         if score >= beta {
-            if config.killer_moves && !is_capture(board, m) && (ply as usize) < MAX_PLY {
-                let slot = &mut killers[ply as usize];
-                if slot[0] != Some(m) {
-                    slot[1] = slot[0];
-                    slot[0] = Some(m);
+            if !is_capture(board, m) {
+                if config.killer_moves && (ply as usize) < MAX_PLY {
+                    let slot = &mut killers[ply as usize];
+                    if slot[0] != Some(m) {
+                        slot[1] = slot[0];
+                        slot[0] = Some(m);
+                    }
+                }
+                // History: reward this quiet from→to move by depth², so it
+                // sorts ahead of untried quiets at every ply, not just here.
+                if config.history_heuristic {
+                    let side = board.side_to_move.to_index();
+                    let slot =
+                        &mut history[side][m.get_src().to_usize()][m.get_dest().to_usize()];
+                    *slot = (*slot + (depth * depth) as i32).min(HISTORY_MAX);
                 }
             }
             if config.transposition_table {
@@ -677,6 +745,7 @@ fn qsearch(
     beta: i32,
     ply: u32,
     config: SearchConfig,
+    history: &HistoryTable,
     abort: &AbortSignal,
     nodes: &mut u64,
 ) -> i32 {
@@ -687,7 +756,7 @@ fn qsearch(
     {
         return 0;
     }
-    let stand_pat = eval(board, config.piece_square_tables, config.pawn_structure);
+    let stand_pat = eval(board, config.eval_config());
     if stand_pat >= beta {
         return beta;
     }
@@ -699,13 +768,13 @@ fn qsearch(
     let mut moves = generate_legal_moves(board);
     moves.retain(|m| mvv_lva_score(board, *m) > 0);
     if config.move_ordering {
-        order_moves(board, &mut moves, None, [None, None]);
+        order_moves(board, &mut moves, None, [None, None], history);
     }
 
     for m in moves {
         let mut next = *board;
         next.apply_move(m).unwrap();
-        let score = -qsearch(&next, -beta, -alpha, ply + 1, config, abort, nodes);
+        let score = -qsearch(&next, -beta, -alpha, ply + 1, config, history, abort, nodes);
         if config.mid_search_abort && abort.fire() {
             return alpha;
         }
@@ -757,19 +826,26 @@ fn order_moves(
     moves: &mut Vec<Move>,
     hint: Option<Move>,
     killers: [Option<Move>; 2],
+    history: &HistoryTable,
 ) {
+    let side = board.side_to_move.to_index();
     moves.sort_by_key(|m| {
+        // Lower key = searched earlier. Each category sits in its own
+        // disjoint band: the TT move, then captures (MVV-LVA), then killers,
+        // then quiet moves ranked by history score, with untried quiets
+        // (history 0) last. The band offsets are wide enough that no two
+        // categories can ever interleave.
         if Some(*m) == hint {
-            return -1_000_000;
+            return i32::MIN;
         }
         let mvv = mvv_lva_score(board, *m);
         if mvv > 0 {
-            return -mvv;
+            return -(1 << 28) - mvv;
         }
         if Some(*m) == killers[0] || Some(*m) == killers[1] {
-            return -50;
+            return -(1 << 24);
         }
-        0
+        -history[side][m.get_src().to_usize()][m.get_dest().to_usize()].min(HISTORY_MAX)
     });
 }
 
@@ -1348,5 +1424,68 @@ mod tests {
         )
         .unwrap();
         assert_eq!(score, MATE_SCORE - 1);
+    }
+
+    #[test]
+    fn history_heuristic_matches_no_history_score() {
+        // History is a pure move-ordering heuristic; the best score must be
+        // identical to a search with it off, on the same position and depth.
+        let board = pos("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1");
+        let with_history = find_best_move_with(
+            &board,
+            4,
+            SearchConfig { history_heuristic: true, ..SearchConfig::default() },
+        )
+        .unwrap();
+        let without_history = find_best_move_with(
+            &board,
+            4,
+            SearchConfig { history_heuristic: false, ..SearchConfig::default() },
+        )
+        .unwrap();
+        assert_eq!(with_history.1, without_history.1);
+    }
+
+    #[test]
+    fn history_heuristic_finds_mate_in_one() {
+        let board = pos("k7/8/1K6/3Q4/8/8/8/8 w - - 0 1");
+        let (_, score) = find_best_move_with(
+            &board,
+            2,
+            SearchConfig { history_heuristic: true, ..SearchConfig::default() },
+        )
+        .unwrap();
+        assert_eq!(score, MATE_SCORE - 1);
+    }
+
+    #[test]
+    fn order_moves_bands_are_disjoint() {
+        // The capture / killer / history-quiet ordering bands must never
+        // interleave: a capture sorts before any killer, and a killer before
+        // any history-ranked quiet — even when a history score has grown all
+        // the way to HISTORY_MAX.
+        let board = pos("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1");
+        let mut moves = generate_legal_moves(&board);
+        let side = board.side_to_move.to_index();
+        let mut quiets = moves.iter().copied().filter(|m| !is_capture(&board, *m));
+        let killer = quiets.next().expect("kiwipete has quiet moves");
+        let hist_quiet = quiets.next().expect("kiwipete has >1 quiet move");
+        let capture = moves
+            .iter()
+            .copied()
+            .find(|m| is_capture(&board, *m))
+            .expect("kiwipete has captures");
+
+        let mut history = new_history();
+        history[side][hist_quiet.get_src().to_usize()][hist_quiet.get_dest().to_usize()] =
+            HISTORY_MAX;
+        order_moves(&board, &mut moves, None, [Some(killer), None], &history);
+
+        let idx = |target: Move| moves.iter().position(|m| *m == target).unwrap();
+        assert!(idx(capture) < idx(killer), "capture must sort before killer");
+        assert!(
+            idx(killer) < idx(hist_quiet),
+            "killer must sort before a history-maxed quiet"
+        );
     }
 }

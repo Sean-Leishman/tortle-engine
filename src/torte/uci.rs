@@ -98,8 +98,20 @@ fn emit_options(config: &SearchConfig) {
         config.pawn_structure
     ));
     emit(&format!(
+        "option name BishopPair type check default {}",
+        config.bishop_pair
+    ));
+    emit(&format!(
+        "option name KingSafety type check default {}",
+        config.king_safety
+    ));
+    emit(&format!(
         "option name KillerMoves type check default {}",
         config.killer_moves
+    ));
+    emit(&format!(
+        "option name HistoryHeuristic type check default {}",
+        config.history_heuristic
     ));
     emit(&format!(
         "option name MidSearchAbort type check default {}",
@@ -167,9 +179,24 @@ pub fn apply_setoption(args: &str, config: &mut SearchConfig, tt: &mut Transposi
                 config.pawn_structure = b;
             }
         }
+        "BishopPair" => {
+            if let Some(b) = parse_bool(&value) {
+                config.bishop_pair = b;
+            }
+        }
+        "KingSafety" => {
+            if let Some(b) = parse_bool(&value) {
+                config.king_safety = b;
+            }
+        }
         "KillerMoves" => {
             if let Some(b) = parse_bool(&value) {
                 config.killer_moves = b;
+            }
+        }
+        "HistoryHeuristic" => {
+            if let Some(b) = parse_bool(&value) {
+                config.history_heuristic = b;
             }
         }
         "MidSearchAbort" => {
@@ -277,8 +304,17 @@ fn handle_go(board: &Board, args: GoArgs, config: SearchConfig, tt: &mut Transpo
         )
     } else {
         let mut killers = crate::torte::search::search::new_killers();
+        let mut history = crate::torte::search::search::new_history();
         let abort = crate::torte::search::search::AbortSignal::with_deadline(deadline);
-        let r = find_best_move_with_tt(board, args.max_depth, config, tt, &mut killers, &abort);
+        let r = find_best_move_with_tt(
+            board,
+            args.max_depth,
+            config,
+            tt,
+            &mut killers,
+            &mut history,
+            &abort,
+        );
         if let Some((mv, score)) = r {
             emit(&format!(
                 "info depth {} score {} time {} pv {}",
@@ -569,6 +605,26 @@ mod tests {
     }
 
     #[test]
+    fn setoption_toggles_bishop_pair() {
+        let mut config = SearchConfig::default();
+        assert!(config.bishop_pair);
+        setopt("name BishopPair value false", &mut config);
+        assert!(!config.bishop_pair);
+        setopt("name BishopPair value true", &mut config);
+        assert!(config.bishop_pair);
+    }
+
+    #[test]
+    fn setoption_toggles_king_safety() {
+        let mut config = SearchConfig::default();
+        assert!(config.king_safety);
+        setopt("name KingSafety value false", &mut config);
+        assert!(!config.king_safety);
+        setopt("name KingSafety value true", &mut config);
+        assert!(config.king_safety);
+    }
+
+    #[test]
     fn setoption_toggles_killer_moves() {
         let mut config = SearchConfig::default();
         assert!(config.killer_moves);
@@ -576,6 +632,16 @@ mod tests {
         assert!(!config.killer_moves);
         setopt("name KillerMoves value true", &mut config);
         assert!(config.killer_moves);
+    }
+
+    #[test]
+    fn setoption_toggles_history_heuristic() {
+        let mut config = SearchConfig::default();
+        assert!(config.history_heuristic);
+        setopt("name HistoryHeuristic value false", &mut config);
+        assert!(!config.history_heuristic);
+        setopt("name HistoryHeuristic value true", &mut config);
+        assert!(config.history_heuristic);
     }
 
     #[test]

@@ -114,18 +114,22 @@ Currently:
 - `piece_square_tables: bool` (default `true`) — adds per-square positional bonuses (tapered MG/EG PSTs) plus mobility on top of material in `eval`. Toggle via `setoption name PieceSquareTables value <true|false>`.
   - Qualitative impact: with PST on, the engine plays `b1c3` from startpos (knight development); with PST off, it plays `a2a3` (the first move enumerated, no positional reason to prefer anything).
 - `pawn_structure: bool` (default `true`) — adds doubled (−15 cp per extra pawn on a file), isolated (−15 cp), and passed-pawn terms to `eval`. The passed-pawn bonus is rank-scaled and phase-scaled (~2× in a pure pawn endgame). Toggle via `setoption name PawnStructure value <true|false>`.
+- `bishop_pair: bool` (default `true`) — flat +30 cp for holding both bishops. Toggle via `setoption name BishopPair value <true|false>`.
+- `king_safety: bool` (default `true`) — pawn-shield bonus for a king still on its home rank, phase-scaled so it fades to 0 in the endgame. Toggle via `setoption name KingSafety value <true|false>`.
 
 Not implemented yet (each will get its own toggle): killers/history, null-move pruning, late-move reductions, incremental Zobrist hashing, TT size as a UCI `Hash` spin option, endgame king PST + tapered eval.
 
 ## Evaluation
 
-`torte/search/eval.rs` — `eval(&Board, use_pst: bool, use_pawn_structure: bool) -> i32` returns a centipawn score from the side-to-move's perspective.
+`torte/search/eval.rs` — `eval(&Board, EvalConfig) -> i32` returns a centipawn score from the side-to-move's perspective. `EvalConfig` is a small struct of `bool` flags (one per positional term); `EvalConfig::material_only()` and `EvalConfig::all()` are the convenience constructors.
 
 - **Material**: P=100, N=320, B=330, R=500, Q=900, K=0. Exposed as `PIECE_VALUES` for the MVV-LVA code.
-- **Piece-square tables** (when `use_pst` is true): per-piece 64-entry `i32` arrays from white's perspective, indexed so `PST[0] = a1`. Black pieces look up `PST[sq ^ 56]` to mirror the rank. Tables are tapered: separate MG/EG arrays for each piece, lerped by game phase. Mobility (per-piece move counts, weighted) is added in the same `use_pst` branch. No king-safety pawn-shield yet.
-- **Pawn structure** (when `use_pawn_structure` is true): doubled (penalty per extra pawn on a file), isolated (no friendly pawn on an adjacent file), and passed (no enemy pawn on the same/adjacent file ahead). The passed-pawn bonus is rank-scaled and phase-scaled to ~2× in a pure pawn endgame.
+- **Piece-square tables** (`piece_square_tables`): per-piece 64-entry `i32` arrays from white's perspective, indexed so `PST[0] = a1`. Black pieces look up `PST[sq ^ 56]` to mirror the rank. Tables are tapered: separate MG/EG arrays for each piece, lerped by game phase. Mobility (per-piece move counts, weighted) is added under the same flag.
+- **Pawn structure** (`pawn_structure`): doubled (penalty per extra pawn on a file), isolated (no friendly pawn on an adjacent file), and passed (no enemy pawn on the same/adjacent file ahead). The passed-pawn bonus is rank-scaled and phase-scaled to ~2× in a pure pawn endgame.
+- **Bishop pair** (`bishop_pair`): flat ±30 cp for a side holding two or more bishops.
+- **King safety** (`king_safety`): pawn-shield bonus for a king still on its home rank — friendly pawns on the three files around it, more for a pawn on its 2nd rank than one advanced a square. Phase-scaled, so it fades to 0 in the endgame where the king should be active.
 
-The toggles live on `SearchConfig` as `piece_square_tables` and `pawn_structure` (both default `true`). `eval` itself takes plain `bool`s to avoid pulling `SearchConfig` into the eval module — callers (`negamax`, `qsearch`) forward `config.piece_square_tables` and `config.pawn_structure`.
+`EvalConfig` is defined in `eval.rs` (not `search`) so the eval module stays decoupled from `SearchConfig`. `SearchConfig` holds one `bool` per term and `SearchConfig::eval_config()` projects them onto an `EvalConfig`; callers (`negamax`, `qsearch`) forward `config.eval_config()`.
 
 ## REPL search command
 

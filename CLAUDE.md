@@ -86,6 +86,8 @@ REPL conveniences alongside UCI: `d`/`board` prints the position + current `Sear
 | `TranspositionTable`  | true    | 16 MB Zobrist-keyed cache; ~2.2× speedup at kiwipete d6 |
 | `PieceSquareTables`   | true    | Positional bonuses (tapered PSTs + mobility); makes opening play actually look like chess |
 | `PawnStructure`       | true    | Doubled/isolated penalties + rank-and-phase-scaled passed-pawn bonus |
+| `BishopPair`          | true    | Flat +30 cp for holding both bishops |
+| `KingSafety`          | true    | Pawn-shield bonus for a castled king, phase-scaled (fades in the endgame) |
 
 ## Gaps / known limitations
 
@@ -101,6 +103,7 @@ REPL conveniences alongside UCI: `d`/`board` prints the position + current `Sear
 
 A running journal of substantial changes, newest at the top. Each entry should reference its `jj` commit and note: what changed, *why* (the intent), and any visible side-effect (test count, perf number, qualitative play difference). Don't log mechanical refactors or single-line typo fixes.
 
+- **2026-05-14 — eval: bishop pair + king-safety pawn shield (toggleable)** — `bishop_pair()` adds a flat ±30 cp for holding both bishops; `king_safety()` rewards an intact f/g/h (or mirrored) pawn shield in front of a king still on its home rank, phase-scaled so it fades to 0 in the endgame. Introduced `EvalConfig` (in `eval.rs`) — `eval` now takes `eval(board, EvalConfig)` instead of a growing list of bools; `SearchConfig::eval_config()` projects the search toggles onto it. New toggles `BishopPair`, `KingSafety` (both default on). (8 new tests, 116 total.)
 - **2026-05-14 — eval: pawn structure (toggleable)** — `pawn_structure()` in `eval.rs`: doubled (−15 cp per extra pawn on a file), isolated (−15 cp, no friendly pawn on adjacent files), passed (rank-scaled `PASSED_PAWN_BONUS`, phase-scaled to ~2× in a pure pawn endgame). `eval` signature changed to `eval(board, use_pst, use_pawn_structure)`. New toggle `PawnStructure` (default on). Pairs with the tapered pawn EG table — passers get amplified exactly where they matter. (6 new tests, 108 total.)
 - **2026-05-11 — eval+search: piece-square tables (toggleable)** — added 6 PST arrays (P/N/B/R/Q/K-mg) in `eval.rs`; black pieces look up `PST[sq ^ 56]` to mirror rank. New toggle `PieceSquareTables` (default on). Qualitative effect: engine plays `1. Nc3` from startpos instead of `1. a3`. (4 new tests, 69 total.)
 - **2026-05-11 — search: transposition table (toggleable)** — `transposition.rs` with Zobrist keys (seeded xorshift, lazy `OnceLock`), `TTEntry { key, score, best_move, depth, bound }`, power-of-two-sized table. Mate scores adjusted by ply on store/retrieve. TT move used as PV-first ordering hint. New toggle `TranspositionTable` (default on); cleared on `ucinewgame`. ~2.2× speedup on kiwipete d6 (7520ms → 3395ms), same best move. (13 new tests.)
@@ -129,4 +132,4 @@ These are the next likely toggles, drawn from the strong-engine playbook:
 6. **Mid-search abort** — let `stop` and time deadline interrupt within an iteration (atomic flag checked at every node).
 7. **Aspiration windows** — narrow alpha/beta windows around the previous ID iteration's score; fall back on fail-high/low. Combines well with TT.
 
-Then: king-safety pawn shield, bishop-pair bonus, late move pruning (LMP), MultiPV.
+Then: Lazy SMP multithreading (needs a concurrent TT — the real work; ~1.5–1.8× on 4 cores), late move pruning (LMP), MultiPV.
