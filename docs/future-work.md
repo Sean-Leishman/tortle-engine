@@ -40,6 +40,13 @@ The Zobrist hash is recomputed from scratch each node (no incremental update
 on `apply_move`). Always-replace eviction. Size hardcoded at 16 MB — no UCI
 `Hash` spin option.
 
+### Draw detection (none)
+The search has no repetition detection and no fifty-move rule — `grep` for
+either in `search/` comes back empty. The engine cannot see a perpetual
+coming, cannot steer into a saving repetition when losing, and scores a
+repeated position by material rather than 0. Needs a position-key stack
+threaded through the search plus a `halfmove_clock >= 100` check.
+
 ### Quiescence
 Stand-pats even when in check (no check-evasion handling); skips
 promotion-only moves (no capture component).

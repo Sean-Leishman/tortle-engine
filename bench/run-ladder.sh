@@ -30,7 +30,7 @@ TORTE="../target/release/torte"
 FASTCHESS="./fastchess"
 BOOK="books/noob_3moves.epd"
 
-for f in "$TORTE" "$FASTCHESS" "$BOOK" engines/sungorus engines/vice engines/stockfish-bin; do
+for f in "$TORTE" "$FASTCHESS" "$BOOK"; do
   [[ -e "$f" ]] || { echo "missing: $f  (see README.md)" >&2; exit 1; }
 done
 
@@ -50,6 +50,13 @@ for key in sungorus vice sf1500 sf1800 sf2100; do
   ENGINE_ARGS+=( -engine name="$name" $args )
 done
 [[ ${#ENGINE_ARGS[@]} -gt 0 ]] || { echo "no opponent matched OPP=$OPP" >&2; exit 1; }
+
+# Only the selected opponents need to exist -- OPP=sungorus shouldn't demand a
+# Stockfish download.
+for arg in "${ENGINE_ARGS[@]}"; do
+  [[ "$arg" == cmd=* ]] || continue
+  [[ -e "${arg#cmd=}" ]] || { echo "missing: ${arg#cmd=}  (see README.md)" >&2; exit 1; }
+done
 
 mkdir -p results
 STAMP="$(date +%Y%m%d-%H%M%S)"

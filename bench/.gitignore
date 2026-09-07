@@ -8,3 +8,6 @@ books/
 results/
 
 # Tracked: run-ladder.sh, README.md, .gitignore
+
+# fastchess autosaves its resolved tournament config here on every run.
+config.json

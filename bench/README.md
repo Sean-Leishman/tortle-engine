@@ -64,6 +64,10 @@ opponent (with error bars). PGN and full log land in `results/`.
 
 ## Reading the result
 
+**Last measured (2026-09-07):** vs Sungorus 1.4, 50 games at 10+0.1 —
+**Elo −478 ± 219** (1W/45L/4D), no forfeits. Puts torte around **1500**. See
+`docs/log.md` for the follow-up A/B that ruled out unsound pruning.
+
 torte's estimated Elo ≈ **opponent's CCRL Elo + torte's reported diff**, averaged
 across opponents whose diff is small (a ±400 blowout barely constrains the
 estimate). Approximate CCRL Blitz anchors — **treat as soft**, verify against the
@@ -77,10 +81,10 @@ current CCRL list:
 
 ## Caveats
 
-- **Time losses.** torte only checks its deadline *between* ID iterations
-  (see root `CLAUDE.md`). At fast TC a deep iteration can overrun and lose on
-  time, deflating the result. Check the fastchess log for `time forfeit` /
-  `loses on time`; if you see them, raise `TC` and re-run.
+- **Time losses.** No longer a concern: mid-search abort landed in 823b447, and
+  a 50-game run at 10+0.1 on 2026-09-07 recorded *zero* time forfeits. Still
+  worth grepping the log for `time forfeit` / `loses on time` after a run at a
+  faster TC than 10+0.1.
 - SF's `UCI_Elo` is convenient but its low-end calibration is widely considered
   unreliable — lean on Sungorus/Vice for the actual anchor, SF for bracketing.
 - One opening book, `order=random` — fine for absolute strength. Same opening is
