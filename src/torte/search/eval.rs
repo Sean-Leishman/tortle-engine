@@ -344,6 +344,57 @@ fn pawn_structure(board: &Board, phase: i32) -> i32 {
 /// Bonus in centipawns for holding both bishops. The pair covers both square
 /// colours and is worth more than two knights in most positions, so it earns
 /// a flat bump beyond the per-piece material values.
+/// Home squares of the pieces the development term cares about, as White
+/// bitboards. Black's are the same masks byte-swapped (rank mirror).
+const KNIGHT_HOME_BB: u64 = 0x0000_0000_0000_0042; // b1, g1
+const BISHOP_HOME_BB: u64 = 0x0000_0000_0000_0024; // c1, f1
+const QUEEN_HOME_BB: u64 = 0x0000_0000_0000_0008; // d1
+
+/// Penalty per minor piece still sitting on its home square.
+const UNDEVELOPED_MINOR_PENALTY: i32 = 12;
+
+/// Extra penalty per undeveloped minor when the queen has already left home.
+/// This is what punishes the early-queen sortie: the queen picks up ~15-20 cp
+/// of mobility and central PST by coming out on move 4, and nothing else in
+/// the eval charges her for doing it before the pieces behind her.
+const EARLY_QUEEN_PENALTY: i32 = 10;
+
+/// Flat bonus for having the move. Tiny, but it stops the search from being
+/// indifferent between two positions that differ only by a lost tempo.
+const TEMPO_BONUS: i32 = 10;
+
+/// Development penalty for one side, as a positive number to subtract.
+/// Phase-scaled by the caller so it vanishes in the endgame, where a knight
+/// on b1 is a normal square rather than a sign of a wasted opening.
+fn development_penalty(board: &Board, color: Color) -> i32 {
+    let (knights, bishops, queens, mirror) = match color {
+        Color::White => (board.bbs[1], board.bbs[2], board.bbs[4], false),
+        Color::Black => (board.bbs[7], board.bbs[8], board.bbs[10], true),
+    };
+    let home = |mask: u64| if mirror { mask.swap_bytes() } else { mask };
+
+    let undeveloped = (knights.board & home(KNIGHT_HOME_BB)).count_ones() as i32
+        + (bishops.board & home(BISHOP_HOME_BB)).count_ones() as i32;
+    let mut penalty = undeveloped * UNDEVELOPED_MINOR_PENALTY;
+
+    // "Early" queen = off her home square while at least two minors are still
+    // asleep. One developed minor is a normal move order (1. e4 Nf6 2. Qe2);
+    // three is a Scholar's-mate impression.
+    let queen_out = queens.board != 0 && (queens.board & home(QUEEN_HOME_BB)) == 0;
+    if queen_out && undeveloped >= 2 {
+        penalty += undeveloped * EARLY_QUEEN_PENALTY;
+    }
+    penalty
+}
+
+/// White-positive development term: how much more developed White is than
+/// Black, faded out towards the endgame.
+fn development(board: &Board, phase: i32) -> i32 {
+    let diff = development_penalty(board, Color::Black)
+        - development_penalty(board, Color::White);
+    diff * phase / PHASE_MAX
+}
+
 const BISHOP_PAIR_BONUS: i32 = 30;
 
 /// Bishop-pair eval: `+BISHOP_PAIR_BONUS` if white has two or more bishops,
@@ -427,6 +478,8 @@ pub struct EvalConfig {
     pub bishop_pair: bool,
     /// Pawn-shield bonus for a castled king (phase-scaled).
     pub king_safety: bool,
+    /// Undeveloped-minor / early-queen penalties plus the tempo bonus.
+    pub development: bool,
 }
 
 impl EvalConfig {
@@ -437,12 +490,14 @@ impl EvalConfig {
             pawn_structure: false,
             bishop_pair: false,
             king_safety: false,
+            development: false,
         }
     }
 
     /// Every positional term on.
     pub fn all() -> Self {
         Self {
+            development: true,
             piece_square_tables: true,
             pawn_structure: true,
             bishop_pair: true,
@@ -457,8 +512,10 @@ impl EvalConfig {
 /// reused without pulling in the search module's types.
 pub fn eval(board: &Board, cfg: EvalConfig) -> i32 {
     let mut score = 0;
-    let needs_phase =
-        cfg.piece_square_tables || cfg.pawn_structure || cfg.king_safety;
+    let needs_phase = cfg.piece_square_tables
+        || cfg.pawn_structure
+        || cfg.king_safety
+        || cfg.development;
     let phase = if needs_phase { game_phase(board) } else { 0 };
     for kind in 0..6 {
         let mut bb = board.bbs[kind].board;
@@ -492,16 +549,32 @@ pub fn eval(board: &Board, cfg: EvalConfig) -> i32 {
     if cfg.king_safety {
         score += king_safety(board, phase);
     }
-    if board.side_to_move == Color::White {
+    if cfg.development {
+        score += development(board, phase);
+    }
+    // Flip to the side-to-move's perspective, then add tempo — tempo always
+    // belongs to whoever is on the move, so it goes on after the flip.
+    let score = if board.side_to_move == Color::White {
         score
     } else {
         -score
+    };
+    if cfg.development {
+        score + TEMPO_BONUS
+    } else {
+        score
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Everything except development — for tests asserting an exact symmetry
+    /// that the side-to-move tempo bonus deliberately breaks.
+    fn no_development() -> EvalConfig {
+        EvalConfig { development: false, ..EvalConfig::all() }
+    }
 
     /// Material eval plus only the pawn-structure term — for the
     /// structure-specific tests that want to isolate it.
@@ -539,7 +612,10 @@ mod tests {
         // White and black are mirror-symmetric in the start position, so PST
         // contributions must cancel exactly.
         let board = Board::parse("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
-        assert_eq!(eval(&board, EvalConfig::all()), 0);
+        // Development off: the tempo bonus inside it is deliberately *not*
+        // symmetric (it belongs to whoever is on the move), and this test is
+        // about the PST halves cancelling.
+        assert_eq!(eval(&board, no_development()), 0);
     }
 
     #[test]
@@ -645,14 +721,64 @@ mod tests {
         let board = Board::parse("4k3/8/8/8/8/8/8/3NK3 w - - 0 1");
         let mirrored = Board::parse("3nk3/8/8/8/8/8/8/4K3 w - - 0 1");
         // White knight on d1 only.
-        let v1 = eval(&board, EvalConfig::all());
+        let v1 = eval(&board, no_development());
         // Black knight on d8 only.
-        let v2 = eval(&mirrored, EvalConfig::all());
+        let v2 = eval(&mirrored, no_development());
         // The boards have one knight each on mirror-image squares (different
         // colours, same relative square). Their PST contributions should be
         // exact negatives of each other (white knight side > 0, black knight
         // side < 0, mirrored across the rank axis).
         assert_eq!(v1, -v2);
+    }
+
+    /// Material eval plus only the development term.
+    fn development_only() -> EvalConfig {
+        EvalConfig { development: true, ..EvalConfig::material_only() }
+    }
+
+    #[test]
+    fn development_rewards_getting_minors_out() {
+        // Same material; White has both knights out, Black has none.
+        let developed = Board::parse(
+            "rnbqkbnr/pppppppp/8/8/8/2N2N2/PPPPPPPP/R1BQKB1R w KQkq - 0 1",
+        );
+        let undeveloped =
+            Board::parse("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+        assert!(
+            eval(&developed, development_only()) > eval(&undeveloped, development_only()),
+            "two knights out should beat two knights home"
+        );
+    }
+
+    #[test]
+    fn development_penalizes_the_early_queen() {
+        // White's queen is on b3 with every minor still at home — the exact
+        // pattern the ladder games showed torte drifting into.
+        let queen_out =
+            Board::parse("rnbqkbnr/pppppppp/8/8/8/1Q6/PPPPPPPP/RNB1KBNR w KQkq - 0 1");
+        let queen_home =
+            Board::parse("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+        assert!(
+            eval(&queen_out, development_only()) < eval(&queen_home, development_only()),
+            "an early queen sortie should cost, not pay"
+        );
+    }
+
+    #[test]
+    fn development_fades_in_the_endgame() {
+        // Bare kings and pawns: phase is 0, so a knight's home square carries
+        // no penalty any more. Only the tempo bonus is left.
+        let board = Board::parse("4k3/pppppppp/8/8/8/8/PPPPPPPP/4K3 w - - 0 1");
+        assert_eq!(eval(&board, development_only()), eval(&board, EvalConfig::material_only()) + TEMPO_BONUS);
+    }
+
+    #[test]
+    fn tempo_belongs_to_the_side_to_move() {
+        // Identical position, opposite side to move: each side sees +tempo.
+        let white = Board::parse("4k3/8/8/8/8/8/8/4K3 w - - 0 1");
+        let black = Board::parse("4k3/8/8/8/8/8/8/4K3 b - - 0 1");
+        assert_eq!(eval(&white, development_only()), TEMPO_BONUS);
+        assert_eq!(eval(&black, development_only()), TEMPO_BONUS);
     }
 
     #[test]

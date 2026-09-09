@@ -88,21 +88,39 @@ REPL conveniences alongside UCI: `d`/`board` prints the position + current `Sear
 | `PawnStructure`       | true    | Doubled/isolated penalties + rank-and-phase-scaled passed-pawn bonus |
 | `BishopPair`          | true    | Flat +30 cp for holding both bishops |
 | `KingSafety`          | true    | Pawn-shield bonus for a castled king, phase-scaled (fades in the endgame) |
+| `Development`         | true    | Undeveloped-minor + early-queen penalties (phase-scaled) and a flat 10 cp tempo bonus. **+26 ± 47 Elo** self-play; **no measurable effect vs Sungorus** |
+| `KillerMoves`         | true    | Two quiet cutoff moves remembered per ply, tried early; persists across ID iterations |
+| `HistoryHeuristic`    | true    | `[side][from][to]` table bumped by depth² on quiet cutoffs; orders quiets globally |
+| `MidSearchAbort`      | true    | Checks the `AbortSignal` (deadline + atomic stop) every 2048 nodes so `go movetime` can interrupt inside an iteration |
+| `NullMovePruning`     | true    | R=2 at depth ≥ 3, with in-check and zugzwang (no non-pawn material) guards |
+| `AspirationWindows`   | true    | ±100 cp window around the previous ID score from depth 5; full re-search on fail high/low |
+| `LateMoveReductions`  | true    | R=1 on quiet non-promotion moves from index 3 at depth ≥ 3, full-depth re-search if it beats alpha |
+| `FutilityPruning`     | true    | Frontier depths 1-2, 150 cp × depth margin, on quiet non-promotion moves |
+| `Razoring`            | **false** | Drop to qsearch at depths 1-3 when static eval + margin < alpha. Measured a wash-to-loss against the rest of the stack; kept for re-tuning |
+| `DrawDetection`       | true    | Repetition (2-fold within the search path, including the played game) + fifty-move rule, scored 0. **+62 ± 45 Elo** self-play; **no measurable effect vs Sungorus** — kept as a correctness fix |
+| `Hash`                | 16 (spin) | TT size in MB, 1..1024 |
+
+The whole speculative-pruning stack together (`NullMovePruning` +
+`LateMoveReductions` + `FutilityPruning` + `AspirationWindows`) is worth
+**+166 ± 47 Elo** over having all four off — measured, 200 games at 10+0.1.
 
 ## Gaps / known limitations
 
-- **Eval**: no tapered eval (single king PST, not separate middlegame/endgame), no mobility, no king safety beyond king PST, no pawn structure terms.
-- **Search**: no killers/history, no null-move pruning, no LMR, no aspiration windows, no mid-search abort (deadline only checked between ID iterations).
-- **TT**: hash recomputed from scratch each node (no incremental Zobrist update on `apply_move`); always-replace eviction; size hardcoded at 16 MB (no UCI `Hash` spin option).
+- **Strength**: ~1600 (measured 2026-09-09: −397 ± 81 Elo vs Sungorus 1.4, 200 games at 10+0.1). The remaining gap to ~2000 is *eval*, not search — see `docs/log.md` for the runs that ruled out the clock, crashes, and unsound pruning.
+- **Eval**: king safety is pawn-shield only — no attack-square counting around the king, which is the biggest single gap left. No king tropism, no rook-on-open-file, no space term. `Development` is crude home-square counting rather than real activity scoring.
+- **Search**: no LMP, no MultiPV, no SMP. (Killers, history, NMP, LMR, aspiration, futility and mid-search abort all landed — see the toggle table.)
+- **TT**: always-replace eviction, single-entry buckets (no depth-preferred or two-tier replacement).
 - **Quiescence**: stand-pats even when in check (no check-evasion handling); skips promotion-only moves (no capture component).
 - **Move encoding**: `Move::from_uci` panics on malformed input — the REPL crashes on bad input. Inferring castle/ep/double-push from src+dest+piece is fine for legal play but not robust to arbitrary inputs.
-- **UCI**: `stop` during search is a no-op (search is synchronous); `Hash` size option not exposed; no `Ponder` / `MultiPV` etc.
+- **UCI**: `stop` is still a no-op — `AbortSignal` *has* a `stop: Option<Arc<AtomicBool>>` and `MidSearchAbort` checks it, but `handle_go` only ever builds `AbortSignal::with_deadline`, so nothing sets the flag and the search is driven synchronously from the reader loop anyway. Wiring it up is mostly moving the search off the reader thread. No `Ponder` / `MultiPV`. `info` lines carry no `nodes`/`nps`, and the `pv` is a single move (no PV line extraction).
 - **Hygiene**: `while true` in `torte.rs` left over from original scaffolding (replaceable with `loop`); a few `dead_code` warnings on bitboard helpers (`new`, `count`, `get_msb`) and SQ constants (`NONE`, `is_ok`, etc.) that will be used by upcoming features.
 
 ## Work log
 
 A running journal of substantial changes, newest at the top. Each entry should reference its `jj` commit and note: what changed, *why* (the intent), and any visible side-effect (test count, perf number, qualitative play difference). Don't log mechanical refactors or single-line typo fixes.
 
+- **2026-09-09 — search+eval: draw detection + development term (toggleable)** — the search had *no* draw detection at all: no repetition check, no fifty-move rule. `negamax` is now a gate in front of `negamax_inner` that returns 0 for a repeated position or a clock at 100, using a `Vec<u64>` path threaded alongside `killers`/`history` and seeded from the played game via the new `parse_position_with_history`. Scan steps by 2 (same side to move) and stops after `halfmove_clock` plies; null-move children zero the clock so the scan can't cross a boundary real play can't reach. Separately, `development()` penalises minors on home squares and an early queen, phase-scaled, plus a 10 cp tempo bonus — aimed at the early-queen wandering the ladder games exposed. New toggles `DrawDetection`, `Development`. Self-play (320 games): DrawDetection **+62 ± 45**, Development **+26 ± 47**. But matched 200-game runs vs Sungorus read −386.6 ± 64.7 (both off) vs −396.7 ± 80.9 (both on) — **no measurable gain against a stronger opponent**; self-play A/B answers a different, easier question. Kept on: draw detection is a correctness fix first. Also established that 2026-09-07's −478 was noise — the real baseline is −387, so torte was ~1610 all along. (15 new tests, 135 total.)
+- **2026-09-07 — bench: first real calibration, and what it ruled out** — torte measured at **−478 ± 219 Elo vs Sungorus 1.4** (~2000 CCRL), 50 games at 10+0.1. *(That absolute number was noise; a matched 200-game run on 2026-09-09 reads −387 ± 65. The diagnosis below stands.)* Zero time forfeits, zero crashes, zero illegal moves. A self-play A/B with the whole speculative-pruning stack disabled showed the stack is worth **+166 ± 47 Elo**, killing the "unsound pruning" hypothesis. Speed is fine (depth 10 startpos in 1.5 s). The gap is eval: games show no hung pieces and evals that track Sungorus, then drift 0.00 → −2.5 over ~30 quiet moves. Fixed `run-ladder.sh`'s preflight (demanded every opponent binary even for `OPP=sungorus`) and untracked `bench/config.json` (a fastchess autosave).
 - **2026-05-14 — eval: bishop pair + king-safety pawn shield (toggleable)** — `bishop_pair()` adds a flat ±30 cp for holding both bishops; `king_safety()` rewards an intact f/g/h (or mirrored) pawn shield in front of a king still on its home rank, phase-scaled so it fades to 0 in the endgame. Introduced `EvalConfig` (in `eval.rs`) — `eval` now takes `eval(board, EvalConfig)` instead of a growing list of bools; `SearchConfig::eval_config()` projects the search toggles onto it. New toggles `BishopPair`, `KingSafety` (both default on). (8 new tests, 116 total.)
 - **2026-05-14 — eval: pawn structure (toggleable)** — `pawn_structure()` in `eval.rs`: doubled (−15 cp per extra pawn on a file), isolated (−15 cp, no friendly pawn on adjacent files), passed (rank-scaled `PASSED_PAWN_BONUS`, phase-scaled to ~2× in a pure pawn endgame). `eval` signature changed to `eval(board, use_pst, use_pawn_structure)`. New toggle `PawnStructure` (default on). Pairs with the tapered pawn EG table — passers get amplified exactly where they matter. (6 new tests, 108 total.)
 - **2026-05-11 — eval+search: piece-square tables (toggleable)** — added 6 PST arrays (P/N/B/R/Q/K-mg) in `eval.rs`; black pieces look up `PST[sq ^ 56]` to mirror rank. New toggle `PieceSquareTables` (default on). Qualitative effect: engine plays `1. Nc3` from startpos instead of `1. a3`. (4 new tests, 69 total.)

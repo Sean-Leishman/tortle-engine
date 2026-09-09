@@ -64,9 +64,17 @@ opponent (with error bars). PGN and full log land in `results/`.
 
 ## Reading the result
 
-**Last measured (2026-09-07):** vs Sungorus 1.4, 50 games at 10+0.1 —
-**Elo −478 ± 219** (1W/45L/4D), no forfeits. Puts torte around **1500**. See
-`docs/log.md` for the follow-up A/B that ruled out unsound pruning.
+**Last measured (2026-09-09):** vs Sungorus 1.4, 200 games at 10+0.1 —
+**Elo −397 ± 81** (9.25%), no forfeits. Puts torte around **1600**. The
+matched run with the two newest eval/search toggles off reads −387 ± 65, i.e.
+statistically the same.
+
+**Use 200 games, not 50.** The first run of this ladder was 50 games and
+returned −478 ± 219; a 50-game run of the *newer* build returned −263 ± 114.
+Both were noise — the 200-game runs put the two builds within 10 Elo of each
+other. At 50 games the error bar is wider than most effects worth measuring,
+so a 50-game run can only tell you "roughly what class of engine is this",
+never "did my change help". See `docs/log.md`.
 
 torte's estimated Elo ≈ **opponent's CCRL Elo + torte's reported diff**, averaged
 across opponents whose diff is small (a ±400 blowout barely constrains the

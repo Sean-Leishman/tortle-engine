@@ -21,6 +21,9 @@ pub fn run(board: &mut Board) {
     let mut line = String::new();
     let mut config = SearchConfig::default();
     let mut tt = TranspositionTable::new(DEFAULT_HASH_MB);
+    // Zobrist keys of the positions played before `board`, for repetition
+    // detection. Reset by `ucinewgame`/`position`, extended by REPL moves.
+    let mut game_history: Vec<u64> = Vec::new();
 
     loop {
         line.clear();
@@ -46,17 +49,25 @@ pub fn run(board: &mut Board) {
             "isready" => emit("readyok"),
             "ucinewgame" => {
                 *board = Board::parse(STARTPOS);
+                game_history.clear();
                 tt.clear();
             }
             "position" => {
-                if let Some(b) = parse_position(rest) {
+                if let Some((b, keys)) = parse_position_with_history(rest) {
                     *board = b;
+                    game_history = keys;
                 } else {
                     emit("info string failed to parse position");
                 }
             }
             "setoption" => apply_setoption(rest, &mut config, &mut tt),
-            "go" => handle_go(board, parse_go(rest, board.side_to_move), config, &mut tt),
+            "go" => handle_go(
+                board,
+                parse_go(rest, board.side_to_move),
+                config,
+                &mut tt,
+                &game_history,
+            ),
             "d" | "board" => {
                 println!("{:?}", board);
                 emit(&format!("info string config {:?}", config));
@@ -64,7 +75,10 @@ pub fn run(board: &mut Board) {
             "stop" | "ponderhit" | "debug" | "register" => {}
             "quit" | "exit" => break,
             _ => {
-                if board.apply_uci_move(trimmed).is_err() {
+                let key_before = board.zobrist;
+                if board.apply_uci_move(trimmed).is_ok() {
+                    game_history.push(key_before);
+                } else {
                     emit(&format!("info string unknown command or illegal move: {}", trimmed));
                 }
             }
@@ -136,6 +150,14 @@ fn emit_options(config: &SearchConfig) {
     emit(&format!(
         "option name Razoring type check default {}",
         config.razoring
+    ));
+    emit(&format!(
+        "option name DrawDetection type check default {}",
+        config.draw_detection
+    ));
+    emit(&format!(
+        "option name Development type check default {}",
+        config.development
     ));
     emit(&format!(
         "option name Hash type spin default {} min {} max {}",
@@ -229,6 +251,16 @@ pub fn apply_setoption(args: &str, config: &mut SearchConfig, tt: &mut Transposi
                 config.razoring = b;
             }
         }
+        "DrawDetection" => {
+            if let Some(b) = parse_bool(&value) {
+                config.draw_detection = b;
+            }
+        }
+        "Development" => {
+            if let Some(b) = parse_bool(&value) {
+                config.development = b;
+            }
+        }
         "Hash" => {
             if let Ok(mb) = value.trim().parse::<usize>() {
                 let clamped = mb.clamp(MIN_HASH_MB, MAX_HASH_MB);
@@ -279,7 +311,13 @@ fn emit(s: &str) {
     let _ = h.flush();
 }
 
-fn handle_go(board: &Board, args: GoArgs, config: SearchConfig, tt: &mut TranspositionTable) {
+fn handle_go(
+    board: &Board,
+    args: GoArgs,
+    config: SearchConfig,
+    tt: &mut TranspositionTable,
+    game_history: &[u64],
+) {
     let start = Instant::now();
     let deadline = args
         .time_budget_ms
@@ -292,6 +330,7 @@ fn handle_go(board: &Board, args: GoArgs, config: SearchConfig, tt: &mut Transpo
             config,
             deadline,
             tt,
+            game_history,
             |d, mv, score, elapsed| {
                 emit(&format!(
                     "info depth {} score {} time {} pv {}",
@@ -306,6 +345,7 @@ fn handle_go(board: &Board, args: GoArgs, config: SearchConfig, tt: &mut Transpo
         let mut killers = crate::torte::search::search::new_killers();
         let mut history = crate::torte::search::search::new_history();
         let abort = crate::torte::search::search::AbortSignal::with_deadline(deadline);
+        let mut path = game_history.to_vec();
         let r = find_best_move_with_tt(
             board,
             args.max_depth,
@@ -313,6 +353,7 @@ fn handle_go(board: &Board, args: GoArgs, config: SearchConfig, tt: &mut Transpo
             tt,
             &mut killers,
             &mut history,
+            &mut path,
             &abort,
         );
         if let Some((mv, score)) = r {
@@ -334,6 +375,14 @@ fn handle_go(board: &Board, args: GoArgs, config: SearchConfig, tt: &mut Transpo
 }
 
 pub fn parse_position(args: &str) -> Option<Board> {
+    parse_position_with_history(args).map(|(b, _)| b)
+}
+
+/// Like `parse_position`, but also returns the Zobrist key of every position
+/// the game passed through *before* the final one. The search needs these to
+/// see a repetition back into the played game rather than only inside its own
+/// tree.
+pub fn parse_position_with_history(args: &str) -> Option<(Board, Vec<u64>)> {
     let mut tokens = args.split_whitespace().peekable();
     let first = tokens.next()?;
     let mut board = match first {
@@ -354,15 +403,17 @@ pub fn parse_position(args: &str) -> Option<Board> {
         _ => return None,
     };
 
+    let mut keys = Vec::new();
     if let Some(t) = tokens.next() {
         if t != "moves" {
             return None;
         }
         for mv in tokens {
+            keys.push(board.zobrist);
             board.apply_uci_move(mv).ok()?;
         }
     }
-    Some(board)
+    Some((board, keys))
 }
 
 const MAX_DEPTH_TIMED: u32 = 64;
@@ -672,6 +723,43 @@ mod tests {
         assert!(!config.aspiration_windows);
         setopt("name AspirationWindows value true", &mut config);
         assert!(config.aspiration_windows);
+    }
+
+    #[test]
+    fn setoption_toggles_draw_detection() {
+        let mut config = SearchConfig::default();
+        assert!(config.draw_detection);
+        setopt("name DrawDetection value false", &mut config);
+        assert!(!config.draw_detection);
+        setopt("name DrawDetection value true", &mut config);
+        assert!(config.draw_detection);
+    }
+
+    #[test]
+    fn setoption_toggles_development() {
+        let mut config = SearchConfig::default();
+        assert!(config.development);
+        setopt("name Development value false", &mut config);
+        assert!(!config.development);
+        setopt("name Development value true", &mut config);
+        assert!(config.development);
+    }
+
+    #[test]
+    fn position_with_moves_records_game_history() {
+        let (board, keys) =
+            parse_position_with_history("startpos moves e2e4 e7e5 g1f3").unwrap();
+        // One key per position *left behind*, not counting the final one.
+        assert_eq!(keys.len(), 3);
+        assert!(!keys.contains(&board.zobrist), "the final position isn't history yet");
+        // The first key is the start position.
+        assert_eq!(keys[0], Board::parse(STARTPOS).zobrist);
+    }
+
+    #[test]
+    fn position_without_moves_has_empty_history() {
+        let (_, keys) = parse_position_with_history("startpos").unwrap();
+        assert!(keys.is_empty());
     }
 
     #[test]

@@ -5,11 +5,83 @@ what changed, *why*, and any visible side-effect (test count, perf number,
 qualitative play difference). Mechanical refactors and typo fixes are not
 logged. Derived from the `jj`/git history.
 
+- **2026-09-09 — search+eval: draw detection and a development term, both
+  toggleable** — the two fixes the 2026-09-07 calibration pointed at.
+  - **Draw detection** (`DrawDetection`, default on). The search had none:
+    no repetition check, no fifty-move rule. `negamax` is now a thin gate in
+    front of `negamax_inner` that, before pushing the node's own key, returns
+    `DRAW_SCORE` (0) if the position repeats an ancestor or the halfmove clock
+    has hit 100. The repetition path is a `Vec<u64>` threaded alongside
+    `killers`/`history`, seeded from the *played game* — `position ... moves`
+    now returns those keys via `parse_position_with_history`, so the engine can
+    see a repetition back into the game rather than only inside its own tree.
+    Two subtleties worth keeping: the scan steps by 2 (only same-side-to-move
+    positions can repeat) and stops after `halfmove_clock` plies (a capture or
+    pawn move makes everything earlier unreachable); and the null-move child
+    sets `halfmove_clock = 0` so the scan can't match across a null-move
+    boundary, which isn't reachable by real play. The fifty-move return is
+    guarded so a checkmate delivered on the 100th halfmove still wins.
+  - **Development term** (`Development`, default on). `development()` penalises
+    each minor still on its home square, adds an extra penalty per undeveloped
+    minor when the queen has already left home, phase-scales both so they
+    vanish in the endgame, and adds a flat 10 cp tempo bonus after the
+    perspective flip. Aimed squarely at the early-queen wandering the ladder
+    games showed (Qb3/Qb5+/Qb4/Qc4/Qe2/Qd1 inside 17 moves with every minor at
+    home): the queen was picking up ~15-20 cp of mobility and central PST for
+    coming out early and nothing was charging her for it.
+
+  **Measurement, and a caveat that matters more than the numbers.** Self-play
+  gauntlet, 320 games at 10+0.1, each toggle disabled in turn against the new
+  default:
+
+  | Term | Self-play Elo | Note |
+  |------|---------------|------|
+  | `DrawDetection` | **+62 ± 45** | clear win against itself |
+  | `Development` | **+26 ± 47** | positive, error bar crosses zero |
+
+  But against a *stronger* opponent the gain does not show up. Matched
+  200-game runs vs Sungorus 1.4, same TC, same book, toggles the only
+  difference:
+
+  | Build | Elo vs Sungorus | Score |
+  |-------|-----------------|-------|
+  | both toggles **off** (= the old engine) | −386.6 ± 64.7 | 9.75% |
+  | both toggles **on** (new default) | −396.7 ± 80.9 | 9.25% |
+
+  That is *no measurable change* — the two overlap comfortably, and the new
+  build is nominally the worse of the pair. The reading: draw detection buys
+  points in positions that are actually drawable, and against an opponent ~400
+  Elo stronger those barely arise; torte is being outplayed, not shuffled into
+  repetitions. Self-play A/B measures value against an equal, which is a
+  different and easier question. Kept both on anyway — draw detection is a
+  correctness fix before it is a strength feature (an engine that cannot see a
+  repetition or the fifty-move rule will happily shuffle away a won game), and
+  neither term costs anything measurable.
+
+  **Also: the −478 from 2026-09-07 was noise.** That figure came from 50
+  games (±219). The matched 200-game baseline above puts the pre-change engine
+  at −386.6 ± 65, so torte was never ~1500 — it was ~1610 then and is ~1600
+  now. Lesson recorded: 50 games is not a measurement, it is a hint. The
+  intermediate 50-game run of the new build read −263 ± 114 and would have
+  supported a triumphant "+215 Elo!" write-up that the 200-game run flatly
+  contradicts.
+
+  Qualitative: opening play is visibly saner — 1. e4 e5 2. Nf3 Nc6 3. d4
+  rather than an early queen sortie.
+
+  Six existing exact-score tests had to be scoped (`development: false`) rather
+  than have the tempo constant baked into their expected values — they assert
+  PST/material symmetry, and tempo is deliberately *not* symmetric because it
+  belongs to whoever is on the move. 15 new tests, 135 total (+2 ignored perft).
+
 - **2026-09-07 — bench: first real calibration — torte is ~1500 Elo, and the
   gap is eval, not bugs** — bootstrapped `bench/` (fastchess 1.8.2, Sungorus
   1.4, noob_3moves book) and ran the ladder for the first time since the
   aborted 3-round run in May. Result vs Sungorus 1.4 (~2000 CCRL), 50 games at
-  10+0.1: **Elo −478 ± 219** (1W/45L/4D). Diagnosis, in the order the
+  10+0.1: **Elo −478 ± 219** (1W/45L/4D). *(Superseded 2026-09-09: a matched
+  200-game run put this same build at −386.6 ± 64.7. The 50-game figure was
+  noise — the diagnosis below still holds, the absolute number doesn't.)*
+  Diagnosis, in the order the
   hypotheses were killed:
   - *Not the clock.* Zero time forfeits across 50 games. The `bench/README.md`
     caveat about deadlines only being checked between ID iterations was stale —

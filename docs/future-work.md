@@ -29,7 +29,10 @@ Then: Lazy SMP multithreading (needs a concurrent TT — the real work; expect
 ## Known limitations to clean up
 
 ### Eval
-No mobility term; king safety is pawn-shield only; no tapered king PST.
+King safety is pawn-shield only — no attack-square counting around the king,
+which is the single biggest remaining gap against ~2000 opposition. No
+king-tropism, no rook-on-open-file, no space term. The development term is
+crude (home-square counting); a real one would score piece activity instead.
 
 ### Search
 No killers/history, null-move pruning, LMR, or aspiration windows. No
@@ -39,13 +42,6 @@ mid-search abort — the deadline is only checked between ID iterations.
 The Zobrist hash is recomputed from scratch each node (no incremental update
 on `apply_move`). Always-replace eviction. Size hardcoded at 16 MB — no UCI
 `Hash` spin option.
-
-### Draw detection (none)
-The search has no repetition detection and no fifty-move rule — `grep` for
-either in `search/` comes back empty. The engine cannot see a perpetual
-coming, cannot steer into a saving repetition when losing, and scores a
-repeated position by material rather than 0. Needs a position-key stack
-threaded through the search plus a `halfmove_clock >= 100` check.
 
 ### Quiescence
 Stand-pats even when in check (no check-evasion handling); skips

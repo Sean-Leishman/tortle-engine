@@ -99,6 +99,8 @@ pub struct SearchConfig {
     pub late_move_reductions: bool,
     pub futility_pruning: bool,
     pub razoring: bool,
+    pub draw_detection: bool,
+    pub development: bool,
 }
 
 impl Default for SearchConfig {
@@ -119,6 +121,8 @@ impl Default for SearchConfig {
             aspiration_windows: true,
             late_move_reductions: true,
             futility_pruning: true,
+            draw_detection: true,
+            development: true,
             // Razoring is off by default — see RAZOR_MAX_DEPTH note. Toggle
             // on via `setoption name Razoring value true` for experiments.
             razoring: false,
@@ -134,6 +138,7 @@ impl SearchConfig {
             pawn_structure: self.pawn_structure,
             bishop_pair: self.bishop_pair,
             king_safety: self.king_safety,
+            development: self.development,
         }
     }
 }
@@ -208,6 +213,34 @@ fn razor_margin(depth: u32) -> i32 {
     }
 }
 
+/// Score for a drawn position (repetition or fifty-move). Contempt is 0 — we
+/// are indifferent between a draw and a dead-equal position.
+const DRAW_SCORE: i32 = 0;
+
+/// True if `key` already occurred earlier on the current path.
+///
+/// `path` holds the Zobrist keys of every position from the start of the game
+/// up to (but not including) the node being tested, so `path.last()` is the
+/// immediate parent. Only positions an *even* number of plies back can repeat
+/// (same side to move), hence `.skip(1).step_by(2)`.
+///
+/// The scan stops after `halfmove_clock` plies: a capture or pawn move makes
+/// every earlier position unreachable, and the clock counts exactly those.
+///
+/// A *single* repetition counts as a draw here rather than waiting for the
+/// threefold. That's standard: if a line repeats once inside the search,
+/// whichever side wants the draw can force the second repetition, so the node
+/// is already worth 0.
+fn is_repetition(path: &[u64], key: u64, halfmove_clock: u16) -> bool {
+    let window = (halfmove_clock as usize).min(path.len());
+    path[path.len() - window..]
+        .iter()
+        .rev()
+        .skip(1)
+        .step_by(2)
+        .any(|&k| k == key)
+}
+
 pub fn find_best_move(board: &Board, depth: u32) -> Option<(Move, i32)> {
     find_best_move_with(board, depth, SearchConfig::default())
 }
@@ -220,6 +253,7 @@ pub fn find_best_move_with(
     let mut tt = TranspositionTable::default_size();
     let mut killers = new_killers();
     let mut history = new_history();
+    let mut path = Vec::new();
     find_best_move_with_tt(
         board,
         depth,
@@ -227,6 +261,7 @@ pub fn find_best_move_with(
         &mut tt,
         &mut killers,
         &mut history,
+        &mut path,
         &AbortSignal::never(),
     )
 }
@@ -245,7 +280,15 @@ where
     F: FnMut(u32, Move, i32, Duration),
 {
     let mut tt = TranspositionTable::default_size();
-    iterative_deepening_with_tt(board, max_depth, config, deadline, &mut tt, on_iteration)
+    iterative_deepening_with_tt(
+        board,
+        max_depth,
+        config,
+        deadline,
+        &mut tt,
+        &[],
+        on_iteration,
+    )
 }
 
 pub fn iterative_deepening_with_tt<F>(
@@ -254,6 +297,7 @@ pub fn iterative_deepening_with_tt<F>(
     config: SearchConfig,
     deadline: Option<Instant>,
     tt: &mut TranspositionTable,
+    game_history: &[u64],
     mut on_iteration: F,
 ) -> Option<(Move, i32)>
 where
@@ -265,6 +309,7 @@ where
         config,
         AbortSignal::with_deadline(deadline),
         tt,
+        game_history,
         &mut on_iteration,
     )
 }
@@ -278,6 +323,7 @@ pub fn iterative_deepening_with_abort<F>(
     config: SearchConfig,
     abort: AbortSignal,
     tt: &mut TranspositionTable,
+    game_history: &[u64],
     on_iteration: &mut F,
 ) -> Option<(Move, i32)>
 where
@@ -289,6 +335,12 @@ where
     // caused a cutoff at depth N-1 is still a promising candidate at depth N.
     let mut killers = new_killers();
     let mut history = new_history();
+    // Zobrist keys of every position actually played before the root, so the
+    // search can see a repetition back into the game, not just within its own
+    // tree. The search pushes/pops on top of this; `truncate` below is belt
+    // and braces in case an abort unwinds a frame early.
+    let mut path: Vec<u64> = game_history.to_vec();
+    let path_base = path.len();
 
     for d in 1..=max_depth {
         if abort.fire() {
@@ -296,8 +348,10 @@ where
         }
 
         let result = search_one_iteration(
-            board, d, &last_best, config, tt, &mut killers, &mut history, &abort,
+            board, d, &last_best, config, tt, &mut killers, &mut history, &mut path,
+            &abort,
         );
+        path.truncate(path_base);
         // If the iteration was interrupted mid-flight, its result is unreliable —
         // discard it and fall back to the deepest fully-completed iteration.
         if abort.fire() {
@@ -330,26 +384,32 @@ fn search_one_iteration(
     tt: &mut TranspositionTable,
     killers: &mut KillerTable,
     history: &mut HistoryTable,
+    path: &mut Vec<u64>,
     abort: &AbortSignal,
 ) -> Option<(Move, i32)> {
     if !config.aspiration_windows || depth < ASPIRATION_MIN_DEPTH {
-        return find_best_move_with_tt(board, depth, config, tt, killers, history, abort);
+        return find_best_move_with_tt(board, depth, config, tt, killers, history, path, abort);
     }
     let prev_score = match *last_best {
         Some((_, s)) if s.abs() < MATE_SCORE - 1000 => s,
         // First iteration or near-mate score: no useful window to narrow to.
-        _ => return find_best_move_with_tt(board, depth, config, tt, killers, history, abort),
+        _ => {
+            return find_best_move_with_tt(
+                board, depth, config, tt, killers, history, path, abort,
+            )
+        }
     };
 
     let alpha = prev_score - ASPIRATION_DELTA;
     let beta = prev_score + ASPIRATION_DELTA;
-    let result =
-        find_best_move_with_window(board, depth, alpha, beta, config, tt, killers, history, abort)?;
+    let result = find_best_move_with_window(
+        board, depth, alpha, beta, config, tt, killers, history, path, abort,
+    )?;
     let (_, score) = result;
     if score <= alpha || score >= beta {
         // Fail high/low: the true score lies outside our guess. Re-search at
         // full width to get the correct best move and score.
-        find_best_move_with_tt(board, depth, config, tt, killers, history, abort)
+        find_best_move_with_tt(board, depth, config, tt, killers, history, path, abort)
     } else {
         Some(result)
     }
@@ -362,10 +422,11 @@ pub fn find_best_move_with_tt(
     tt: &mut TranspositionTable,
     killers: &mut KillerTable,
     history: &mut HistoryTable,
+    path: &mut Vec<u64>,
     abort: &AbortSignal,
 ) -> Option<(Move, i32)> {
     find_best_move_with_window(
-        board, depth, -INFINITY, INFINITY, config, tt, killers, history, abort,
+        board, depth, -INFINITY, INFINITY, config, tt, killers, history, path, abort,
     )
 }
 
@@ -383,12 +444,16 @@ pub fn find_best_move_with_window(
     tt: &mut TranspositionTable,
     killers: &mut KillerTable,
     history: &mut HistoryTable,
+    path: &mut Vec<u64>,
     abort: &AbortSignal,
 ) -> Option<(Move, i32)> {
     let mut moves = generate_legal_moves(board);
     if moves.is_empty() {
         return None;
     }
+    // The root position joins the path so a child can detect a repetition
+    // back to it. Popped before every return below.
+    path.push(board.zobrist);
 
     // At the root we don't return early on a TT hit (we need the best move),
     // but we do use the stored move as the ordering hint.
@@ -424,12 +489,14 @@ pub fn find_best_move_with_window(
             tt,
             killers,
             history,
+            path,
             abort,
             &mut nodes,
         );
         if config.mid_search_abort && abort.fire() {
             // Result of this branch is unreliable; bail out and let the caller
             // discard the iteration.
+            path.pop();
             return Some((best_move, best_score));
         }
         if score > best_score {
@@ -448,9 +515,13 @@ pub fn find_best_move_with_window(
         });
     }
 
+    path.pop();
     Some((best_move, best_score))
 }
 
+/// Draw-detection gate around `negamax_inner`. Checked *before* the node's own
+/// key joins the path, so a position only matches genuine ancestors.
+#[allow(clippy::too_many_arguments)]
 fn negamax(
     board: &Board,
     depth: u32,
@@ -461,6 +532,45 @@ fn negamax(
     tt: &mut TranspositionTable,
     killers: &mut KillerTable,
     history: &mut HistoryTable,
+    path: &mut Vec<u64>,
+    abort: &AbortSignal,
+    nodes: &mut u64,
+) -> i32 {
+    // Never draw-score the root: we have to return a move regardless.
+    if config.draw_detection && ply > 0 {
+        // Fifty-move rule. Checkmate on the 100th halfmove still wins, so the
+        // draw only applies when the side to move isn't mated. Generating
+        // moves is only paid on the rare node that actually hits the clock.
+        if board.halfmove_clock >= 100
+            && (!in_check(board) || !generate_legal_moves(board).is_empty())
+        {
+            return DRAW_SCORE;
+        }
+        if is_repetition(path, board.zobrist, board.halfmove_clock) {
+            return DRAW_SCORE;
+        }
+    }
+    path.push(board.zobrist);
+    let score = negamax_inner(
+        board, depth, alpha, beta, ply, config, tt, killers, history, path, abort,
+        nodes,
+    );
+    path.pop();
+    score
+}
+
+#[allow(clippy::too_many_arguments)]
+fn negamax_inner(
+    board: &Board,
+    depth: u32,
+    alpha: i32,
+    beta: i32,
+    ply: u32,
+    config: SearchConfig,
+    tt: &mut TranspositionTable,
+    killers: &mut KillerTable,
+    history: &mut HistoryTable,
+    path: &mut Vec<u64>,
     abort: &AbortSignal,
     nodes: &mut u64,
 ) -> i32 {
@@ -549,6 +659,12 @@ fn negamax(
         null.en_passant = None;
         null.side_to_move = board.side_to_move.opposite();
         null.zobrist ^= crate::torte::search::transposition::side_key();
+        // A null move isn't reachable by real play, so positions before it
+        // must not count as repetitions of positions after it. Zeroing the
+        // clock closes the scan window at this boundary. Costs only some
+        // fifty-move detection inside the null subtree, which is fine — the
+        // null search is a heuristic bound, not a claimed line.
+        null.halfmove_clock = 0;
         let reduced = depth - 1 - NULL_MOVE_REDUCTION;
         let score = -negamax(
             &null,
@@ -560,6 +676,7 @@ fn negamax(
             tt,
             killers,
             history,
+            path,
             abort,
             nodes,
         );
@@ -623,6 +740,7 @@ fn negamax(
                 tt,
                 killers,
                 history,
+                path,
                 abort,
                 nodes,
             )
@@ -637,6 +755,7 @@ fn negamax(
                 tt,
                 killers,
                 history,
+                path,
                 abort,
                 nodes,
             )
@@ -654,6 +773,7 @@ fn negamax(
                 tt,
                 killers,
                 history,
+                path,
                 abort,
                 nodes,
             );
@@ -933,7 +1053,11 @@ mod tests {
         let (mv, score) = find_best_move_with(
             &board,
             2,
-            SearchConfig { piece_square_tables: false, ..SearchConfig::default() },
+            SearchConfig {
+                piece_square_tables: false,
+                development: false,
+                ..SearchConfig::default()
+            },
         )
         .unwrap();
         assert_eq!(mv.to_uci(), "c3b5");
@@ -1002,6 +1126,7 @@ mod tests {
                 move_ordering: true,
                 quiescence: true,
                 piece_square_tables: false,
+                development: false,
                 ..SearchConfig::default()
             },
         )
@@ -1013,6 +1138,7 @@ mod tests {
                 move_ordering: true,
                 quiescence: false,
                 piece_square_tables: false,
+                development: false,
                 ..SearchConfig::default()
             },
         )
@@ -1021,6 +1147,116 @@ mod tests {
         assert_eq!(without_q.1, 320, "no-q should overestimate the trade");
         assert_eq!(with_q.1, 0, "qsearch should see the recapture");
         assert!(with_q.1 < without_q.1);
+    }
+
+    #[test]
+    fn is_repetition_finds_position_two_plies_back() {
+        // path = [A, B]; testing A again means A repeated after two plies.
+        assert!(is_repetition(&[0xAA, 0xBB], 0xAA, 4));
+    }
+
+    #[test]
+    fn is_repetition_ignores_odd_distances() {
+        // The immediate parent has the other side to move, so it can never be
+        // the same position however equal the keys look.
+        assert!(!is_repetition(&[0xAA, 0xBB], 0xBB, 4));
+        // Three plies back: also the wrong side to move.
+        assert!(!is_repetition(&[0xCC, 0xAA, 0xBB], 0xCC, 8));
+    }
+
+    #[test]
+    fn is_repetition_respects_halfmove_window() {
+        // A capture or pawn move makes everything before it unreachable, and
+        // the halfmove clock is exactly how far back that is. With a clock of
+        // 1 there is nothing to scan.
+        assert!(is_repetition(&[0xAA, 0xBB], 0xAA, 4));
+        assert!(!is_repetition(&[0xAA, 0xBB], 0xAA, 1));
+        assert!(!is_repetition(&[], 0xAA, 4));
+    }
+
+    #[test]
+    fn fifty_move_rule_scores_as_draw() {
+        // White is up a whole queen, but the halfmove clock is already at 100,
+        // so every child of the root is a claimable draw. Nothing here is
+        // check or mate, so the guard doesn't apply.
+        let board = pos("7k/8/8/8/8/8/8/KQ6 w - - 100 1");
+
+        let with_draws = find_best_move_with(
+            &board,
+            1,
+            SearchConfig { draw_detection: true, ..SearchConfig::default() },
+        )
+        .unwrap();
+        let without_draws = find_best_move_with(
+            &board,
+            1,
+            SearchConfig { draw_detection: false, ..SearchConfig::default() },
+        )
+        .unwrap();
+
+        assert_eq!(with_draws.1, 0, "fifty-move should score the queen away");
+        assert!(
+            without_draws.1 > 500,
+            "without draw detection White should still count the queen, got {}",
+            without_draws.1
+        );
+    }
+
+    #[test]
+    fn fifty_move_rule_does_not_mask_checkmate() {
+        // Back-rank mate with the clock already past 100. The mate wins; the
+        // fifty-move draw must not swallow it.
+        let board = pos("6k1/5ppp/8/8/8/8/8/R5K1 w - - 100 1");
+        let (mv, score) = find_best_move_with(
+            &board,
+            2,
+            SearchConfig { draw_detection: true, ..SearchConfig::default() },
+        )
+        .unwrap();
+        assert_eq!(mv.to_uci(), "a1a8");
+        assert!(score >= MATE_SCORE - 1000, "expected a mate score, got {}", score);
+    }
+
+    #[test]
+    fn repetition_of_a_played_position_scores_as_draw() {
+        // Shuffle the knights back and forth so the root has already occurred
+        // earlier in the game. From the root, returning the knight repeats a
+        // position that is in the game history, and that line must score 0.
+        let (board, game_history) = crate::torte::uci::parse_position_with_history(
+            "startpos moves g1f3 g8f6 f3g1 f6g8 g1f3 g8f6",
+        )
+        .unwrap();
+        assert_eq!(game_history.len(), 6);
+
+        // Path as the search would see it at the root's children.
+        let mut path = game_history.clone();
+        path.push(board.zobrist);
+        let mut after = board;
+        after.apply_uci_move("f3g1").unwrap();
+        assert!(
+            is_repetition(&path, after.zobrist, after.halfmove_clock),
+            "retreating the knight repeats a position already played"
+        );
+    }
+
+    #[test]
+    fn draw_detection_off_matches_on_when_no_draw_available() {
+        // Identity check: on a position with no repetition and a fresh clock,
+        // the toggle must not change the score.
+        let board = pos("r1bqkbnr/pppp1ppp/2n5/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 4 4");
+        let on = find_best_move_with(
+            &board,
+            4,
+            SearchConfig { draw_detection: true, ..SearchConfig::default() },
+        )
+        .unwrap();
+        let off = find_best_move_with(
+            &board,
+            4,
+            SearchConfig { draw_detection: false, ..SearchConfig::default() },
+        )
+        .unwrap();
+        assert_eq!(on.1, off.1);
     }
 
     #[test]
@@ -1145,7 +1381,11 @@ mod tests {
         let (mv, score) = find_best_move_with(
             &board,
             2,
-            SearchConfig { piece_square_tables: false, ..SearchConfig::default() },
+            SearchConfig {
+                piece_square_tables: false,
+                development: false,
+                ..SearchConfig::default()
+            },
         )
         .unwrap();
         assert_eq!(mv.to_uci(), "c3b5");
@@ -1221,7 +1461,15 @@ mod tests {
         let mut tt = TranspositionTable::default_size();
         let mut on_iter = |_: u32, _: Move, _: i32, _: Duration| {};
         let result =
-            iterative_deepening_with_abort(&board, 6, SearchConfig::default(), abort, &mut tt, &mut on_iter);
+            iterative_deepening_with_abort(
+                &board,
+                6,
+                SearchConfig::default(),
+                abort,
+                &mut tt,
+                &[],
+                &mut on_iter,
+            );
         assert!(result.is_none());
     }
 
@@ -1238,6 +1486,7 @@ mod tests {
             SearchConfig { aspiration_windows: true, ..SearchConfig::default() },
             None,
             &mut tt_a,
+            &[],
             |_, _, _, _| {},
         )
         .unwrap();
@@ -1247,6 +1496,7 @@ mod tests {
             SearchConfig { aspiration_windows: false, ..SearchConfig::default() },
             None,
             &mut tt_b,
+            &[],
             |_, _, _, _| {},
         )
         .unwrap();
@@ -1266,6 +1516,7 @@ mod tests {
             SearchConfig::default(),
             None,
             &mut tt,
+            &[],
             |_, _, _, _| {},
         )
         .unwrap();
