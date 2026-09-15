@@ -34,9 +34,11 @@ src/
       generator.rs              // is_attacked, generate_legal_moves, king_square
       perft.rs                  // perft + perft_divide for movegen verification
     search/
-      eval.rs                   // material + piece-square tables; eval(board, use_pst) -> i32
+      eval.rs                   // traced eval terms + weight offsets; eval(board, EvalConfig) -> i32
       search.rs                 // SearchConfig, negamax, qsearch, iterative_deepening, find_best_move_*
       transposition.rs          // Zobrist keys+hash, TTEntry, Bound, TranspositionTable
+      params.rs                 // generated [mg, eg] eval weight table — rerun `torte tune`, don't hand-edit
+    tune.rs                     // Texel tuner: `torte tune <epd> [epochs] [lambda]`
 ```
 
 ## How to run / dev
@@ -86,8 +88,10 @@ REPL conveniences alongside UCI: `d`/`board` prints the position + current `Sear
 | `TranspositionTable`  | true    | 16 MB Zobrist-keyed cache; ~2.2× speedup at kiwipete d6 |
 | `PieceSquareTables`   | true    | Positional bonuses (tapered PSTs + mobility); makes opening play actually look like chess |
 | `PawnStructure`       | true    | Doubled/isolated penalties + rank-and-phase-scaled passed-pawn bonus |
-| `BishopPair`          | true    | Flat +30 cp for holding both bishops |
-| `KingSafety`          | true    | Pawn-shield bonus for a castled king, phase-scaled (fades in the endgame) |
+| `BishopPair`          | true    | Bonus for holding both bishops (tuned: +35 mg / +57 eg) |
+| `KingSafety`          | true    | Pawn-shield bonus for a king on its home rank (tuned mg/eg) |
+| `RookOpenFile`        | true    | Rook on an open / half-open file (tuned). SPRT pending |
+| `KingAttack`          | true    | Knight/bishop/rook/queen hits on the enemy king zone, per piece type, only with ≥2 attackers (tuned). SPRT pending |
 | `Development`         | true    | Undeveloped-minor + early-queen penalties (phase-scaled) and a flat 10 cp tempo bonus. **+26 ± 47 Elo** self-play; **no measurable effect vs Sungorus** |
 | `KillerMoves`         | true    | Two quiet cutoff moves remembered per ply, tried early; persists across ID iterations |
 | `HistoryHeuristic`    | true    | `[side][from][to]` table bumped by depth² on quiet cutoffs; orders quiets globally |
@@ -106,8 +110,8 @@ The whole speculative-pruning stack together (`NullMovePruning` +
 
 ## Gaps / known limitations
 
-- **Strength**: ~1600 (measured 2026-09-09: −397 ± 81 Elo vs Sungorus 1.4, 200 games at 10+0.1). The remaining gap to ~2000 is *eval*, not search — see `docs/log.md` for the runs that ruled out the clock, crashes, and unsound pruning.
-- **Eval**: king safety is pawn-shield only — no attack-square counting around the king, which is the biggest single gap left. No king tropism, no rook-on-open-file, no space term. `Development` is crude home-square counting rather than real activity scoring.
+- **Strength**: ~1830 provisional (2026-09-15, after Texel tuning: −167 ± 53 vs Sungorus 1.4 over 179 games on a loaded machine — rerun on a quiet one). Before tuning: ~1600 (−397 ± 81, 2026-09-09). Search depth is now the suspect: median depth 6 vs Sungorus's 8 in the lost games.
+- **Eval**: all weights are Texel-tuned (`torte tune`); new terms should be added as traced counts and retuned, not hand-weighted. King attack is linear per-square with a ≥2-attacker gate — no attack-unit safety table. No king tropism, no space term, no threats. The tuner overrode `Development`'s intended sign in the middlegame (it overlaps the minor PSTs).
 - **Search**: no LMP, no MultiPV, no SMP. (Killers, history, NMP, LMR, aspiration, futility and mid-search abort all landed — see the toggle table.)
 - **TT**: always-replace eviction, single-entry buckets (no depth-preferred or two-tier replacement).
 - **Quiescence**: stand-pats even when in check (no check-evasion handling); skips promotion-only moves (no capture component).
@@ -119,6 +123,7 @@ The whole speculative-pruning stack together (`NullMovePruning` +
 
 A running journal of substantial changes, newest at the top. Each entry should reference its `jj` commit and note: what changed, *why* (the intent), and any visible side-effect (test count, perf number, qualitative play difference). Don't log mechanical refactors or single-line typo fixes.
 
+- **2026-09-15 — eval: Texel tuning, plus rook-file and king-attack terms** — ran a cheap check first: the 343 losses to Sungorus are slow positional slides (in 248 torte's own eval was already ≤ −0.8 before it went two pawns down; only 15 were tactical blindsides), and no single missing feature stood out (rook-on-open-file z=2.2, king-zone attackers z=2.1, rest ≤0.5) — pointing at mis-weighted terms rather than one missing term. So: every eval weight now lives in a generated `[mg, eg]` table (`search/params.rs`); each term reports (weight, count) through a `Trace`, so the same code drives both `eval` and the tuner. `torte tune <epd> [epochs] [lambda]` (`tune.rs`) fits all weights with full-batch Adam against 725k Zurichess quiet-labeled positions (`bench/data/`, gitignored; mirror at github.com/KierenP/ChessTrainingSets), with a 10% held-out split and an optional L2 pull toward the starting weights. Loss 0.0651 → 0.0583. **Tuned vs hand weights: +129 ± 34 Elo** self-play (400 games). Vs Sungorus **−167 ± 53** over 179 games (previously −397) — but that run was cut short by the OOM killer on a machine loaded by other jobs, with 6 time forfeits, so treat it as direction, not a number. L2 sweep: any lambda ≥1e-7 hurt held-out loss (0.0585 → 0.0607+), so lambda 0 ships. Then added `RookOpenFile` (open/half-open) and `KingAttack` (per-piece-type hits on the enemy king zone, gated on ≥2 attackers) and retuned: held-out 0.05853 → 0.05800; **SPRT vs the tuned build still pending** (machine too loaded to play 10+0.1 games honestly). New `bench/sprt.sh` (refuses to start on a loaded machine). Weight-sign tests rewritten to check what a term counts, not the tuned sign. (135 tests.)
 - **2026-09-09 — search+eval: draw detection + development term (toggleable)** — the search had *no* draw detection at all: no repetition check, no fifty-move rule. `negamax` is now a gate in front of `negamax_inner` that returns 0 for a repeated position or a clock at 100, using a `Vec<u64>` path threaded alongside `killers`/`history` and seeded from the played game via the new `parse_position_with_history`. Scan steps by 2 (same side to move) and stops after `halfmove_clock` plies; null-move children zero the clock so the scan can't cross a boundary real play can't reach. Separately, `development()` penalises minors on home squares and an early queen, phase-scaled, plus a 10 cp tempo bonus — aimed at the early-queen wandering the ladder games exposed. New toggles `DrawDetection`, `Development`. Self-play (320 games): DrawDetection **+62 ± 45**, Development **+26 ± 47**. But matched 200-game runs vs Sungorus read −386.6 ± 64.7 (both off) vs −396.7 ± 80.9 (both on) — **no measurable gain against a stronger opponent**; self-play A/B answers a different, easier question. Kept on: draw detection is a correctness fix first. Also established that 2026-09-07's −478 was noise — the real baseline is −387, so torte was ~1610 all along. (15 new tests, 135 total.)
 - **2026-09-07 — bench: first real calibration, and what it ruled out** — torte measured at **−478 ± 219 Elo vs Sungorus 1.4** (~2000 CCRL), 50 games at 10+0.1. *(That absolute number was noise; a matched 200-game run on 2026-09-09 reads −387 ± 65. The diagnosis below stands.)* Zero time forfeits, zero crashes, zero illegal moves. A self-play A/B with the whole speculative-pruning stack disabled showed the stack is worth **+166 ± 47 Elo**, killing the "unsound pruning" hypothesis. Speed is fine (depth 10 startpos in 1.5 s). The gap is eval: games show no hung pieces and evals that track Sungorus, then drift 0.00 → −2.5 over ~30 quiet moves. Fixed `run-ladder.sh`'s preflight (demanded every opponent binary even for `OPP=sungorus`) and untracked `bench/config.json` (a fastchess autosave).
 - **2026-05-14 — eval: bishop pair + king-safety pawn shield (toggleable)** — `bishop_pair()` adds a flat ±30 cp for holding both bishops; `king_safety()` rewards an intact f/g/h (or mirrored) pawn shield in front of a king still on its home rank, phase-scaled so it fades to 0 in the endgame. Introduced `EvalConfig` (in `eval.rs`) — `eval` now takes `eval(board, EvalConfig)` instead of a growing list of bools; `SearchConfig::eval_config()` projects the search toggles onto it. New toggles `BishopPair`, `KingSafety` (both default on). (8 new tests, 116 total.)

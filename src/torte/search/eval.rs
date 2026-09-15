@@ -2,7 +2,7 @@ use crate::torte::board::board::Board;
 use crate::torte::board::pieces::Color;
 use crate::torte::core::bitboard::Bitboard;
 use crate::torte::core::sq::SQ;
-use crate::torte::movegen::attacks::knight_attacks;
+use crate::torte::movegen::attacks::{king_attacks, knight_attacks};
 use crate::torte::movegen::magic::{bishop_attacks, queen_attacks, rook_attacks};
 use crate::torte::search::params::W;
 
@@ -33,7 +33,9 @@ pub const SHIELD_PAWN_ADVANCED: usize = SHIELD_PAWN_HOME + 1;
 pub const UNDEVELOPED_MINOR: usize = SHIELD_PAWN_ADVANCED + 1;
 pub const EARLY_QUEEN: usize = UNDEVELOPED_MINOR + 1; // per undeveloped minor
 pub const TEMPO: usize = EARLY_QUEEN + 1;
-pub const NUM_PARAMS: usize = TEMPO + 1;
+pub const ROOK_OPEN_FILE: usize = TEMPO + 1; // open, half-open
+pub const KING_ATTACK: usize = ROOK_OPEN_FILE + 2; // N B R Q, per enemy king-zone square hit
+pub const NUM_PARAMS: usize = KING_ATTACK + 4;
 
 /// Receives eval terms as (weight index, white-minus-black count).
 pub trait Trace {
@@ -80,6 +82,17 @@ pub fn game_phase(board: &Board) -> i32 {
     phase.min(PHASE_MAX)
 }
 
+/// Attack set of a knight (0), bishop (1), rook (2) or queen (3).
+fn piece_attacks(piece: usize, sq: SQ, occ: Bitboard) -> u64 {
+    match piece {
+        0 => knight_attacks(sq),
+        1 => bishop_attacks(sq, occ),
+        2 => rook_attacks(sq, occ),
+        _ => queen_attacks(sq, occ),
+    }
+    .board
+}
+
 /// Mobility: for each knight, bishop, rook and queen, the squares it attacks
 /// excluding own-piece squares.
 fn mobility<T: Trace>(board: &Board, t: &mut T) {
@@ -93,14 +106,8 @@ fn mobility<T: Trace>(board: &Board, t: &mut T) {
         for piece in 0..4 {
             let mut bb = board.bbs[knight_kind + piece].board;
             while bb != 0 {
-                let sq = SQ(bb.trailing_zeros() as u8);
-                let attacks = match piece {
-                    0 => knight_attacks(sq),
-                    1 => bishop_attacks(sq, occ),
-                    2 => rook_attacks(sq, occ),
-                    _ => queen_attacks(sq, occ),
-                };
-                t.add(MOBILITY + piece, sign * (attacks.board & !own).count_ones() as i32);
+                let attacks = piece_attacks(piece, SQ(bb.trailing_zeros() as u8), occ);
+                t.add(MOBILITY + piece, sign * (attacks & !own).count_ones() as i32);
                 bb &= bb - 1;
             }
         }
@@ -230,6 +237,59 @@ fn king_safety<T: Trace>(board: &Board, t: &mut T) {
     }
 }
 
+/// Rooks on a file with no pawns (open) or no own pawns (half-open).
+fn rook_open_file<T: Trace>(board: &Board, t: &mut T) {
+    let pawns = board.bbs[0].board | board.bbs[6].board;
+    for (rooks, own_pawns, sign) in [
+        (board.bbs[3].board, board.bbs[0].board, 1),
+        (board.bbs[9].board, board.bbs[6].board, -1),
+    ] {
+        let mut bb = rooks;
+        while bb != 0 {
+            let file = file_bb(bb.trailing_zeros() % 8);
+            bb &= bb - 1;
+            if pawns & file == 0 {
+                t.add(ROOK_OPEN_FILE, sign);
+            } else if own_pawns & file == 0 {
+                t.add(ROOK_OPEN_FILE + 1, sign);
+            }
+        }
+    }
+}
+
+/// King attack: squares around the enemy king (and the king's own square)
+/// hit by our knights, bishops, rooks and queens, per piece type. Only counted
+/// once two or more pieces join in — a lone attacker is rarely dangerous, and
+/// the gate is what gives this otherwise-linear term its "pile-up" shape.
+fn king_attack<T: Trace>(board: &Board, t: &mut T) {
+    let occ = Bitboard::from_u64(board.player_bbs[0].board | board.player_bbs[1].board);
+    for (knight_kind, enemy_king, sign) in
+        [(1, board.bbs[11].board, 1), (7, board.bbs[5].board, -1)]
+    {
+        if enemy_king == 0 {
+            continue;
+        }
+        let zone = king_attacks(SQ(enemy_king.trailing_zeros() as u8)).board | enemy_king;
+        let mut hits = [0_i32; 4];
+        let mut attackers = 0;
+        for piece in 0..4 {
+            let mut bb = board.bbs[knight_kind + piece].board;
+            while bb != 0 {
+                let n = (piece_attacks(piece, SQ(bb.trailing_zeros() as u8), occ) & zone)
+                    .count_ones() as i32;
+                attackers += (n > 0) as i32;
+                hits[piece] += n;
+                bb &= bb - 1;
+            }
+        }
+        if attackers >= 2 {
+            for piece in 0..4 {
+                t.add(KING_ATTACK + piece, sign * hits[piece]);
+            }
+        }
+    }
+}
+
 /// Which evaluation terms are active. Defined here (not in `search`) so `eval`
 /// stays decoupled from `SearchConfig` — `search` builds one of these from its
 /// own config. All-false is a pure material eval.
@@ -245,6 +305,10 @@ pub struct EvalConfig {
     pub king_safety: bool,
     /// Undeveloped-minor / early-queen penalties plus the tempo bonus.
     pub development: bool,
+    /// Rooks on open / half-open files.
+    pub rook_open_file: bool,
+    /// Piece pressure on the enemy king zone.
+    pub king_attack: bool,
 }
 
 impl EvalConfig {
@@ -256,6 +320,8 @@ impl EvalConfig {
             bishop_pair: false,
             king_safety: false,
             development: false,
+            rook_open_file: false,
+            king_attack: false,
         }
     }
 
@@ -263,6 +329,8 @@ impl EvalConfig {
     pub fn all() -> Self {
         Self {
             development: true,
+            rook_open_file: true,
+            king_attack: true,
             piece_square_tables: true,
             pawn_structure: true,
             bishop_pair: true,
@@ -297,6 +365,12 @@ pub fn trace<T: Trace>(board: &Board, cfg: EvalConfig, t: &mut T) {
     }
     if cfg.king_safety {
         king_safety(board, t);
+    }
+    if cfg.rook_open_file {
+        rook_open_file(board, t);
+    }
+    if cfg.king_attack {
+        king_attack(board, t);
     }
     if cfg.development {
         development(board, t);
@@ -565,6 +639,30 @@ mod tests {
     fn king_safety_ignores_king_off_home_rank() {
         let marched = Board::parse("4k3/8/8/8/8/5PPP/6K1/8 w - - 0 1");
         assert_eq!(term(|t| king_safety(&marched, t), PHASE_MAX), 0);
+    }
+
+    #[test]
+    fn rook_open_file_counts_open_and_half_open() {
+        let cfg = EvalConfig { rook_open_file: true, ..EvalConfig::material_only() };
+        // a-file empty (open); d-file has only a black pawn (half-open for white).
+        let board = Board::parse("4k3/3p4/8/8/8/8/5P2/R2RK3 w - - 0 1");
+        assert_eq!(count(ROOK_OPEN_FILE, &board, cfg), 1);
+        assert_eq!(count(ROOK_OPEN_FILE + 1, &board, cfg), 1);
+        // A rook behind its own pawn gets neither.
+        let closed = Board::parse("4k3/8/8/8/8/8/P7/R3K3 w - - 0 1");
+        assert_eq!(count(ROOK_OPEN_FILE, &closed, cfg) + count(ROOK_OPEN_FILE + 1, &closed, cfg), 0);
+    }
+
+    #[test]
+    fn king_attack_needs_two_attackers() {
+        let cfg = EvalConfig { king_attack: true, ..EvalConfig::material_only() };
+        // Qh5 alone hits f7/h7/h8 around the black king on g8 but is one
+        // attacker; adding Ng5 (f7, h7) makes it two.
+        let lone = Board::parse("6k1/8/8/7Q/8/8/8/4K3 w - - 0 1");
+        let pair = Board::parse("6k1/8/8/6NQ/8/8/8/4K3 w - - 0 1");
+        assert_eq!(count(KING_ATTACK + 3, &lone, cfg), 0);
+        assert!(count(KING_ATTACK + 3, &pair, cfg) > 0);
+        assert_eq!(count(KING_ATTACK, &pair, cfg), 2); // Ng5 hits f7, h7
     }
 
     #[test]

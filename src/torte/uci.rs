@@ -160,6 +160,14 @@ fn emit_options(config: &SearchConfig) {
         config.development
     ));
     emit(&format!(
+        "option name RookOpenFile type check default {}",
+        config.rook_open_file
+    ));
+    emit(&format!(
+        "option name KingAttack type check default {}",
+        config.king_attack
+    ));
+    emit(&format!(
         "option name Hash type spin default {} min {} max {}",
         DEFAULT_HASH_MB, MIN_HASH_MB, MAX_HASH_MB
     ));
@@ -259,6 +267,16 @@ pub fn apply_setoption(args: &str, config: &mut SearchConfig, tt: &mut Transposi
         "Development" => {
             if let Some(b) = parse_bool(&value) {
                 config.development = b;
+            }
+        }
+        "RookOpenFile" => {
+            if let Some(b) = parse_bool(&value) {
+                config.rook_open_file = b;
+            }
+        }
+        "KingAttack" => {
+            if let Some(b) = parse_bool(&value) {
+                config.king_attack = b;
             }
         }
         "Hash" => {
@@ -733,6 +751,14 @@ mod tests {
         assert!(!config.draw_detection);
         setopt("name DrawDetection value true", &mut config);
         assert!(config.draw_detection);
+    }
+
+    #[test]
+    fn setoption_toggles_rook_open_file_and_king_attack() {
+        let mut config = SearchConfig::default();
+        setopt("name RookOpenFile value false", &mut config);
+        setopt("name KingAttack value false", &mut config);
+        assert!(!config.rook_open_file && !config.king_attack);
     }
 
     #[test]

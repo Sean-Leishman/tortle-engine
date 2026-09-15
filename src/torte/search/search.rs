@@ -101,6 +101,8 @@ pub struct SearchConfig {
     pub razoring: bool,
     pub draw_detection: bool,
     pub development: bool,
+    pub rook_open_file: bool,
+    pub king_attack: bool,
 }
 
 impl Default for SearchConfig {
@@ -123,6 +125,8 @@ impl Default for SearchConfig {
             futility_pruning: true,
             draw_detection: true,
             development: true,
+            rook_open_file: true,
+            king_attack: true,
             // Razoring is off by default — see RAZOR_MAX_DEPTH note. Toggle
             // on via `setoption name Razoring value true` for experiments.
             razoring: false,
@@ -139,6 +143,8 @@ impl SearchConfig {
             bishop_pair: self.bishop_pair,
             king_safety: self.king_safety,
             development: self.development,
+            rook_open_file: self.rook_open_file,
+            king_attack: self.king_attack,
         }
     }
 }

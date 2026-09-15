@@ -3,7 +3,7 @@
 Measures **how strong torte is, in Elo**, by playing it as a gauntlet against a
 fixed set of open-source engines with known [CCRL](https://computerchess.org.uk/ccrl/)
 ratings. (For *"is feature X worth keeping?"* — an engine-vs-itself A/B question —
-use SPRT instead; not set up here yet.)
+use `./sprt.sh <new> <base>` instead — it plays until the result is statistically decided.)
 
 ## Layout
 
