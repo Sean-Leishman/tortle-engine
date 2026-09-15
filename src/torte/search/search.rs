@@ -3,6 +3,7 @@ use crate::torte::board::pieces::Color;
 use crate::torte::core::piece_move::Move;
 use crate::torte::movegen::generator::{generate_legal_moves, is_attacked, king_square};
 use crate::torte::search::eval::{eval, EvalConfig, PIECE_VALUES};
+use crate::torte::search::see::see;
 use crate::torte::search::transposition::{Bound, TTEntry, TranspositionTable};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -107,6 +108,7 @@ pub struct SearchConfig {
     pub delta_pruning: bool,
     pub tt_depth_preferred: bool,
     pub qsearch_check_evasions: bool,
+    pub see_pruning: bool,
 }
 
 impl Default for SearchConfig {
@@ -135,6 +137,7 @@ impl Default for SearchConfig {
             delta_pruning: true,
             tt_depth_preferred: true,
             qsearch_check_evasions: true,
+            see_pruning: true,
             // Razoring is off by default — see RAZOR_MAX_DEPTH note. Toggle
             // on via `setoption name Razoring value true` for experiments.
             razoring: false,
@@ -533,12 +536,24 @@ pub fn find_best_move_with_window(
     }
 
     if config.transposition_table {
+        // With aspiration windows the root is searched in a narrow window, so
+        // the score can be a bound rather than the true value: at-or-below
+        // alpha means "no move beat alpha" (upper bound), at-or-above beta
+        // means a cutoff (lower bound). Storing either as Exact would hand a
+        // later probe a value the search never established.
+        let bound = if best_score <= alpha {
+            Bound::UpperBound
+        } else if best_score >= beta {
+            Bound::LowerBound
+        } else {
+            Bound::Exact
+        };
         tt.store(TTEntry {
             key,
             score: store_mate_score(best_score, 0),
             best_move: Some(best_move),
             depth: depth.min(u8::MAX as u32) as u8,
-            bound: Bound::Exact,
+            bound,
             generation: 0,
         }, config.tt_depth_preferred);
     }
@@ -954,6 +969,11 @@ fn qsearch(
     }
 
     for m in moves {
+        // SEE pruning: the exchange on that square loses material outright,
+        // so searching it only wastes nodes proving what SEE already says.
+        if config.see_pruning && !evading && see(board, m) < 0 {
+            continue;
+        }
         // Delta pruning: even winning this piece outright can't reach alpha.
         // Never while evading check — there the move list is all evasions,
         // not optional captures, and skipping one can miss the only escape.

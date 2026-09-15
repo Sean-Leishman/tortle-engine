@@ -161,6 +161,10 @@ fn emit_options(config: &SearchConfig) {
         config.development
     ));
     emit(&format!(
+        "option name SeePruning type check default {}",
+        config.see_pruning
+    ));
+    emit(&format!(
         "option name QsearchCheckEvasions type check default {}",
         config.qsearch_check_evasions
     ));
@@ -284,6 +288,11 @@ pub fn apply_setoption(args: &str, config: &mut SearchConfig, tt: &mut Transposi
         "Development" => {
             if let Some(b) = parse_bool(&value) {
                 config.development = b;
+            }
+        }
+        "SeePruning" => {
+            if let Some(b) = parse_bool(&value) {
+                config.see_pruning = b;
             }
         }
         "QsearchCheckEvasions" => {
