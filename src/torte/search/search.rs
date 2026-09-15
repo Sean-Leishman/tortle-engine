@@ -106,6 +106,7 @@ pub struct SearchConfig {
     pub late_move_pruning: bool,
     pub delta_pruning: bool,
     pub tt_depth_preferred: bool,
+    pub qsearch_check_evasions: bool,
 }
 
 impl Default for SearchConfig {
@@ -133,6 +134,7 @@ impl Default for SearchConfig {
             late_move_pruning: true,
             delta_pruning: true,
             tt_depth_preferred: true,
+            qsearch_check_evasions: true,
             // Razoring is off by default — see RAZOR_MAX_DEPTH note. Toggle
             // on via `setoption name Razoring value true` for experiments.
             razoring: false,
@@ -918,27 +920,47 @@ fn qsearch(
     {
         return 0;
     }
-    let stand_pat = eval(board, config.eval_config());
-    if stand_pat >= beta {
-        return beta;
-    }
+    // In check, standing pat is a lie: the side to move cannot "pass", and
+    // every legal reply has to be considered or a mate reads as a quiet
+    // score. Search all evasions instead, with no stand-pat floor.
+    let evading = config.qsearch_check_evasions && in_check(board);
+
+    let stand_pat_score = if evading {
+        -INFINITY
+    } else {
+        eval(board, config.eval_config())
+    };
     let mut alpha = alpha;
-    if stand_pat > alpha {
-        alpha = stand_pat;
+    if !evading {
+        if stand_pat_score >= beta {
+            return beta;
+        }
+        if stand_pat_score > alpha {
+            alpha = stand_pat_score;
+        }
     }
 
     let mut moves = generate_legal_moves(board);
-    moves.retain(|m| mvv_lva_score(board, *m) > 0);
+    if evading {
+        if moves.is_empty() {
+            // Checkmate, found at a leaf.
+            return terminal_score(board, ply);
+        }
+    } else {
+        moves.retain(|m| mvv_lva_score(board, *m) > 0);
+    }
     if config.move_ordering {
         order_moves(board, &mut moves, None, [None, None], history);
     }
 
     for m in moves {
         // Delta pruning: even winning this piece outright can't reach alpha.
-        // ponytail: no in-check exemption — qsearch already stand-pats in
-        // check, so check evasions are already mis-handled here (see
-        // CLAUDE.md); fix both together or neither.
-        if config.delta_pruning && stand_pat + captured_value(board, m) + DELTA_MARGIN <= alpha {
+        // Never while evading check — there the move list is all evasions,
+        // not optional captures, and skipping one can miss the only escape.
+        if config.delta_pruning
+            && !evading
+            && stand_pat_score + captured_value(board, m) + DELTA_MARGIN <= alpha
+        {
             continue;
         }
         let mut next = *board;
@@ -1354,6 +1376,27 @@ mod tests {
     }
 
     #[test]
+    fn qsearch_sees_mate_delivered_at_the_leaf() {
+        // Qf2-f8 is mate. At depth 1 the mate lands *at* the leaf, so it is
+        // qsearch that has to notice: standing pat there scores the position
+        // as "white is a queen up" and misses the mate entirely.
+        let board = pos("7k/8/6K1/8/8/8/5Q2/8 w - - 0 1");
+        let with_evasions = find_best_move_with(&board, 1, SearchConfig::default()).unwrap();
+        let without = find_best_move_with(
+            &board,
+            1,
+            SearchConfig { qsearch_check_evasions: false, ..SearchConfig::default() },
+        )
+        .unwrap();
+        assert_eq!(with_evasions.1, MATE_SCORE - 1, "mate at the leaf should score as mate");
+        assert!(
+            without.1 < MATE_SCORE - 1000,
+            "without check evasions the leaf stand-pats and the mate is missed, got {}",
+            without.1
+        );
+    }
+
+    #[test]
     fn iterative_deepening_short_circuits_on_mate() {
         let board = pos("k7/8/1K6/3Q4/8/8/8/8 w - - 0 1");
         let mut last_depth = 0;
@@ -1362,8 +1405,10 @@ mod tests {
         })
         .unwrap();
         assert_eq!(result.1, MATE_SCORE - 1);
-        // Mate-in-1 should be found at depth 2 and stop the loop.
-        assert_eq!(last_depth, 2);
+        // Depth 1: the mating move is played, and qsearch — which now searches
+        // check evasions instead of standing pat — sees the mate at the leaf.
+        // Before check evasions this took until depth 2.
+        assert_eq!(last_depth, 1);
     }
 
     #[test]

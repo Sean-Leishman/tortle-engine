@@ -161,6 +161,10 @@ fn emit_options(config: &SearchConfig) {
         config.development
     ));
     emit(&format!(
+        "option name QsearchCheckEvasions type check default {}",
+        config.qsearch_check_evasions
+    ));
+    emit(&format!(
         "option name TTDepthPreferred type check default {}",
         config.tt_depth_preferred
     ));
@@ -280,6 +284,11 @@ pub fn apply_setoption(args: &str, config: &mut SearchConfig, tt: &mut Transposi
         "Development" => {
             if let Some(b) = parse_bool(&value) {
                 config.development = b;
+            }
+        }
+        "QsearchCheckEvasions" => {
+            if let Some(b) = parse_bool(&value) {
+                config.qsearch_check_evasions = b;
             }
         }
         "TTDepthPreferred" => {
