@@ -11,3 +11,6 @@ results/
 
 # fastchess autosaves its resolved tournament config here on every run.
 config.json
+
+# Tuning datasets — see docs/log.md for the download URL.
+data/

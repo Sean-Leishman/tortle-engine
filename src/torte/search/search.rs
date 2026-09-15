@@ -1045,6 +1045,11 @@ mod tests {
         assert!(find_best_move(&board, 2).is_none());
     }
 
+    /// Material-only value of a lone knight (tuned, tapered at its phase).
+    fn lone_knight() -> i32 {
+        eval(&pos("4k3/8/8/8/8/8/8/N3K3 w - - 0 1"), EvalConfig::material_only())
+    }
+
     #[test]
     fn captures_free_material() {
         let board = pos("4k3/8/8/1q6/8/2N5/8/4K3 w - - 0 1");
@@ -1061,7 +1066,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(mv.to_uci(), "c3b5");
-        assert_eq!(score, 320);
+        assert_eq!(score, lone_knight());
     }
 
     #[test]
@@ -1144,7 +1149,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(without_q.1, 320, "no-q should overestimate the trade");
+        assert_eq!(without_q.1, lone_knight(), "no-q should overestimate the trade");
         assert_eq!(with_q.1, 0, "qsearch should see the recapture");
         assert!(with_q.1 < without_q.1);
     }
@@ -1389,7 +1394,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(mv.to_uci(), "c3b5");
-        assert_eq!(score, 320);
+        assert_eq!(score, lone_knight());
     }
 
     #[test]
