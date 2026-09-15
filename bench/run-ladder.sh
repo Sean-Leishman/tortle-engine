@@ -17,6 +17,7 @@
 #   TC           time control, fastchess syntax sec+inc (default 10+0.1)
 #   CONCURRENCY  parallel games (default: nproc)
 #   OPP          restrict to one opponent by key (default: all)
+#   FORCE=1      run even when the machine is already busy
 
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -57,6 +58,14 @@ for arg in "${ENGINE_ARGS[@]}"; do
   [[ "$arg" == cmd=* ]] || continue
   [[ -e "${arg#cmd=}" ]] || { echo "missing: ${arg#cmd=}  (see README.md)" >&2; exit 1; }
 done
+
+# At 10+0.1 a loaded machine produces time forfeits, not a strength measurement:
+# the 2026-09-15 run lost 6 games on the clock at load 12-17 on 8 cores.
+load=$(cut -d' ' -f1 /proc/loadavg)
+if [[ "${FORCE:-0}" != 1 ]] && awk -v l="$load" -v n="$(nproc)" 'BEGIN { exit !(l > n / 4) }'; then
+  echo "load average $load on $(nproc) cores — games would be time-starved. FORCE=1 to run anyway." >&2
+  exit 1
+fi
 
 mkdir -p results
 STAMP="$(date +%Y%m%d-%H%M%S)"

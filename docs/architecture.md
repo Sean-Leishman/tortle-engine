@@ -117,7 +117,11 @@ Currently:
 - `bishop_pair: bool` (default `true`) — flat +30 cp for holding both bishops. Toggle via `setoption name BishopPair value <true|false>`.
 - `king_safety: bool` (default `true`) — pawn-shield bonus for a king still on its home rank, phase-scaled so it fades to 0 in the endgame. Toggle via `setoption name KingSafety value <true|false>`.
 
-Not implemented yet (each will get its own toggle): killers/history, null-move pruning, late-move reductions, incremental Zobrist hashing, TT size as a UCI `Hash` spin option, endgame king PST + tapered eval.
+The list above is the original set; every toggle actually present is tabulated in `CLAUDE.md` (that table is the live one). Landed since: killers/history, null-move pruning, LMR, aspiration windows, futility, razoring (default off), mid-search abort, draw detection, `Hash` spin, tapered PSTs, and — 2026-09-15/16 — `RookOpenFile`, `KingAttack`, `LateMovePruning`, `DeltaPruning`.
+
+Still missing: incremental Zobrist hashing, check evasions in qsearch, depth-preferred TT replacement, SMP, MultiPV.
+
+**Eval weights are no longer hand-chosen.** Every weight is a `[mg, eg]` pair in the generated `search/params.rs`, fitted by `torte tune` (see `tune.rs`); eval terms report `(weight, count)` through a `Trace` so the engine and the tuner share one code path. Values quoted below (−15 cp doubled, +30 bishop pair, …) are the pre-tuning figures kept for shape, not the current numbers.
 
 ## Evaluation
 

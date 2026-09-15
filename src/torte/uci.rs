@@ -1,3 +1,4 @@
+use crate::torte::core::piece_move::Move;
 use crate::torte::board::board::Board;
 use crate::torte::board::pieces::Color;
 use crate::torte::search::search::{
@@ -160,6 +161,14 @@ fn emit_options(config: &SearchConfig) {
         config.development
     ));
     emit(&format!(
+        "option name LateMovePruning type check default {}",
+        config.late_move_pruning
+    ));
+    emit(&format!(
+        "option name DeltaPruning type check default {}",
+        config.delta_pruning
+    ));
+    emit(&format!(
         "option name RookOpenFile type check default {}",
         config.rook_open_file
     ));
@@ -269,6 +278,16 @@ pub fn apply_setoption(args: &str, config: &mut SearchConfig, tt: &mut Transposi
                 config.development = b;
             }
         }
+        "LateMovePruning" => {
+            if let Some(b) = parse_bool(&value) {
+                config.late_move_pruning = b;
+            }
+        }
+        "DeltaPruning" => {
+            if let Some(b) = parse_bool(&value) {
+                config.delta_pruning = b;
+            }
+        }
         "RookOpenFile" => {
             if let Some(b) = parse_bool(&value) {
                 config.rook_open_file = b;
@@ -349,14 +368,8 @@ fn handle_go(
             deadline,
             tt,
             game_history,
-            |d, mv, score, elapsed| {
-                emit(&format!(
-                    "info depth {} score {} time {} pv {}",
-                    d,
-                    format_score(score),
-                    elapsed.as_millis(),
-                    mv
-                ));
+            |d, mv, score, elapsed, nodes| {
+                emit(&info_line(d, score, elapsed, nodes, mv));
             },
         )
     } else {
@@ -364,6 +377,7 @@ fn handle_go(
         let mut history = crate::torte::search::search::new_history();
         let abort = crate::torte::search::search::AbortSignal::with_deadline(deadline);
         let mut path = game_history.to_vec();
+        let mut nodes: u64 = 0;
         let r = find_best_move_with_tt(
             board,
             args.max_depth,
@@ -373,15 +387,10 @@ fn handle_go(
             &mut history,
             &mut path,
             &abort,
+            &mut nodes,
         );
         if let Some((mv, score)) = r {
-            emit(&format!(
-                "info depth {} score {} time {} pv {}",
-                args.max_depth,
-                format_score(score),
-                start.elapsed().as_millis(),
-                mv
-            ));
+            emit(&info_line(args.max_depth, score, start.elapsed(), nodes, mv));
         }
         r
     };
@@ -390,6 +399,25 @@ fn handle_go(
         Some((mv, _)) => emit(&format!("bestmove {}", mv)),
         None => emit("bestmove 0000"),
     }
+}
+
+/// One `info` line. `nps` is omitted rather than divided by a zero clock.
+fn info_line(depth: u32, score: i32, elapsed: Duration, nodes: u64, mv: Move) -> String {
+    let ms = elapsed.as_millis();
+    let nps = if ms > 0 {
+        format!(" nps {}", nodes * 1000 / ms as u64)
+    } else {
+        String::new()
+    };
+    format!(
+        "info depth {} score {} time {} nodes {}{} pv {}",
+        depth,
+        format_score(score),
+        ms,
+        nodes,
+        nps,
+        mv
+    )
 }
 
 pub fn parse_position(args: &str) -> Option<Board> {

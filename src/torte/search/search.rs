@@ -103,6 +103,8 @@ pub struct SearchConfig {
     pub development: bool,
     pub rook_open_file: bool,
     pub king_attack: bool,
+    pub late_move_pruning: bool,
+    pub delta_pruning: bool,
 }
 
 impl Default for SearchConfig {
@@ -127,6 +129,8 @@ impl Default for SearchConfig {
             development: true,
             rook_open_file: true,
             king_attack: true,
+            late_move_pruning: true,
+            delta_pruning: true,
             // Razoring is off by default — see RAZOR_MAX_DEPTH note. Toggle
             // on via `setoption name Razoring value true` for experiments.
             razoring: false,
@@ -186,6 +190,15 @@ const LMR_MIN_MOVE_IDX: usize = 3;
 /// tree is large enough that a single quiet move can swing the score by more
 /// than a fixed margin.
 const FUTILITY_MAX_DEPTH: u32 = 2;
+
+/// Late move pruning: past these move counts at shallow depth, quiet moves are
+/// skipped outright rather than reduced. Indexed by depth (0 unused).
+const LMP_MAX_DEPTH: u32 = 3;
+const LMP_MOVE_COUNT: [usize; 4] = [0, 6, 10, 16];
+
+/// Delta pruning margin in qsearch: a capture that can't lift the stand-pat
+/// score to within this of alpha isn't worth searching.
+const DELTA_MARGIN: i32 = 200;
 
 /// Per-depth futility margin in centipawns. The eval would have to gain more
 /// than this from any single quiet move to lift static_eval above alpha; if
@@ -269,6 +282,7 @@ pub fn find_best_move_with(
         &mut history,
         &mut path,
         &AbortSignal::never(),
+        &mut 0,
     )
 }
 
@@ -283,7 +297,7 @@ pub fn iterative_deepening<F>(
     on_iteration: F,
 ) -> Option<(Move, i32)>
 where
-    F: FnMut(u32, Move, i32, Duration),
+    F: FnMut(u32, Move, i32, Duration, u64),
 {
     let mut tt = TranspositionTable::default_size();
     iterative_deepening_with_tt(
@@ -307,7 +321,7 @@ pub fn iterative_deepening_with_tt<F>(
     mut on_iteration: F,
 ) -> Option<(Move, i32)>
 where
-    F: FnMut(u32, Move, i32, Duration),
+    F: FnMut(u32, Move, i32, Duration, u64),
 {
     iterative_deepening_with_abort(
         board,
@@ -333,7 +347,7 @@ pub fn iterative_deepening_with_abort<F>(
     on_iteration: &mut F,
 ) -> Option<(Move, i32)>
 where
-    F: FnMut(u32, Move, i32, Duration),
+    F: FnMut(u32, Move, i32, Duration, u64),
 {
     let start = Instant::now();
     let mut last_best: Option<(Move, i32)> = None;
@@ -353,9 +367,10 @@ where
             break;
         }
 
+        let mut nodes: u64 = 0;
         let result = search_one_iteration(
             board, d, &last_best, config, tt, &mut killers, &mut history, &mut path,
-            &abort,
+            &abort, &mut nodes,
         );
         path.truncate(path_base);
         // If the iteration was interrupted mid-flight, its result is unreliable —
@@ -365,7 +380,7 @@ where
         }
         match result {
             Some((mv, score)) => {
-                on_iteration(d, mv, score, start.elapsed());
+                on_iteration(d, mv, score, start.elapsed(), nodes);
                 last_best = Some((mv, score));
                 if score.abs() >= MATE_SCORE - 1000 {
                     break;
@@ -392,16 +407,17 @@ fn search_one_iteration(
     history: &mut HistoryTable,
     path: &mut Vec<u64>,
     abort: &AbortSignal,
+    nodes: &mut u64,
 ) -> Option<(Move, i32)> {
     if !config.aspiration_windows || depth < ASPIRATION_MIN_DEPTH {
-        return find_best_move_with_tt(board, depth, config, tt, killers, history, path, abort);
+        return find_best_move_with_tt(board, depth, config, tt, killers, history, path, abort, nodes);
     }
     let prev_score = match *last_best {
         Some((_, s)) if s.abs() < MATE_SCORE - 1000 => s,
         // First iteration or near-mate score: no useful window to narrow to.
         _ => {
             return find_best_move_with_tt(
-                board, depth, config, tt, killers, history, path, abort,
+                board, depth, config, tt, killers, history, path, abort, nodes,
             )
         }
     };
@@ -409,13 +425,13 @@ fn search_one_iteration(
     let alpha = prev_score - ASPIRATION_DELTA;
     let beta = prev_score + ASPIRATION_DELTA;
     let result = find_best_move_with_window(
-        board, depth, alpha, beta, config, tt, killers, history, path, abort,
+        board, depth, alpha, beta, config, tt, killers, history, path, abort, nodes,
     )?;
     let (_, score) = result;
     if score <= alpha || score >= beta {
         // Fail high/low: the true score lies outside our guess. Re-search at
         // full width to get the correct best move and score.
-        find_best_move_with_tt(board, depth, config, tt, killers, history, path, abort)
+        find_best_move_with_tt(board, depth, config, tt, killers, history, path, abort, nodes)
     } else {
         Some(result)
     }
@@ -430,9 +446,10 @@ pub fn find_best_move_with_tt(
     history: &mut HistoryTable,
     path: &mut Vec<u64>,
     abort: &AbortSignal,
+    nodes: &mut u64,
 ) -> Option<(Move, i32)> {
     find_best_move_with_window(
-        board, depth, -INFINITY, INFINITY, config, tt, killers, history, path, abort,
+        board, depth, -INFINITY, INFINITY, config, tt, killers, history, path, abort, nodes,
     )
 }
 
@@ -452,6 +469,7 @@ pub fn find_best_move_with_window(
     history: &mut HistoryTable,
     path: &mut Vec<u64>,
     abort: &AbortSignal,
+    nodes: &mut u64,
 ) -> Option<(Move, i32)> {
     let mut moves = generate_legal_moves(board);
     if moves.is_empty() {
@@ -480,7 +498,6 @@ pub fn find_best_move_with_window(
     // the new best; if all children fall at-or-below alpha we still return
     // alpha as the (fail-low) score.
     let mut best_score = alpha;
-    let mut nodes: u64 = 0;
 
     for m in moves {
         let mut next = *board;
@@ -497,7 +514,7 @@ pub fn find_best_move_with_window(
             history,
             path,
             abort,
-            &mut nodes,
+            nodes,
         );
         if config.mid_search_abort && abort.fire() {
             // Result of this branch is unreliable; bail out and let the caller
@@ -720,6 +737,20 @@ fn negamax_inner(
         };
 
     for (move_index, m) in moves.into_iter().enumerate() {
+        // Late move pruning: deep in a badly-ordered move list at shallow
+        // depth, a quiet move is unlikely to be the best one. ponytail: does
+        // not exempt checking moves — testing that costs a make-move per
+        // candidate, which is what this is trying to save.
+        if config.late_move_pruning
+            && depth <= LMP_MAX_DEPTH
+            && !node_in_check
+            && in_safe_window
+            && move_index >= LMP_MOVE_COUNT[depth as usize]
+            && !is_capture(board, m)
+            && m.get_promotion().is_none()
+        {
+            continue;
+        }
         if futility_prune
             && move_index > 0
             && !is_capture(board, m)
@@ -898,6 +929,13 @@ fn qsearch(
     }
 
     for m in moves {
+        // Delta pruning: even winning this piece outright can't reach alpha.
+        // ponytail: no in-check exemption — qsearch already stand-pats in
+        // check, so check evasions are already mis-handled here (see
+        // CLAUDE.md); fix both together or neither.
+        if config.delta_pruning && stand_pat + captured_value(board, m) + DELTA_MARGIN <= alpha {
+            continue;
+        }
         let mut next = *board;
         next.apply_move(m).unwrap();
         let score = -qsearch(&next, -beta, -alpha, ply + 1, config, history, abort, nodes);
@@ -980,6 +1018,24 @@ fn killer_slice(killers: &KillerTable, ply: u32, config: SearchConfig) -> [Optio
         return [None, None];
     }
     killers[ply as usize]
+}
+
+/// Material the capture wins outright: the victim, plus the promotion gain.
+/// Ignores the recapture — that's the margin's job.
+fn captured_value(board: &Board, mv: Move) -> i32 {
+    let dest = mv.get_dest().to_usize();
+    let opp_off = if board.side_to_move == Color::White { 6 } else { 0 };
+    let mut value = 0;
+    for i in 0..6 {
+        if board.bbs[opp_off + i].get(dest) {
+            value = PIECE_VALUES[i];
+            break;
+        }
+    }
+    if mv.get_promotion().is_some() {
+        value += PIECE_VALUES[4] - PIECE_VALUES[0];
+    }
+    value
 }
 
 pub fn is_capture(board: &Board, mv: Move) -> bool {
@@ -1078,18 +1134,21 @@ mod tests {
     #[test]
     fn ordering_does_not_change_best_score() {
         // Move ordering is a search-efficiency optimization; the best score
-        // must be identical regardless of whether it's enabled.
+        // must be identical regardless of whether it's enabled — but only
+        // while nothing prunes *by move index*. Late move pruning does, so it
+        // makes ordering semantic rather than cosmetic (a good move sorted
+        // late gets pruned, not just searched late) and is off here.
         let board = pos("4k3/8/8/1q6/8/2N5/8/4K3 w - - 0 1");
         let with_ordering = find_best_move_with(
             &board,
             3,
-            SearchConfig { move_ordering: true, ..SearchConfig::default() },
+            SearchConfig { move_ordering: true, late_move_pruning: false, ..SearchConfig::default() },
         )
         .unwrap();
         let without_ordering = find_best_move_with(
             &board,
             3,
-            SearchConfig { move_ordering: false, ..SearchConfig::default() },
+            SearchConfig { move_ordering: false, late_move_pruning: false, ..SearchConfig::default() },
         )
         .unwrap();
         assert_eq!(with_ordering.1, without_ordering.1);
@@ -1275,7 +1334,7 @@ mod tests {
         let board = pos("4k3/8/8/1q6/8/2N5/8/4K3 w - - 0 1");
         let config = SearchConfig::default();
         let direct = find_best_move_with(&board, 4, config).unwrap();
-        let id = iterative_deepening(&board, 4, config, None, |_, _, _, _| {}).unwrap();
+        let id = iterative_deepening(&board, 4, config, None, |_, _, _, _, _| {}).unwrap();
         assert_eq!(direct.1, id.1);
     }
 
@@ -1283,7 +1342,7 @@ mod tests {
     fn iterative_deepening_calls_callback_per_depth() {
         let board = pos("4k3/8/8/1q6/8/2N5/8/4K3 w - - 0 1");
         let mut depths = Vec::new();
-        iterative_deepening(&board, 3, SearchConfig::default(), None, |d, _, _, _| {
+        iterative_deepening(&board, 3, SearchConfig::default(), None, |d, _, _, _, _| {
             depths.push(d);
         });
         assert_eq!(depths, vec![1, 2, 3]);
@@ -1293,7 +1352,7 @@ mod tests {
     fn iterative_deepening_short_circuits_on_mate() {
         let board = pos("k7/8/1K6/3Q4/8/8/8/8 w - - 0 1");
         let mut last_depth = 0;
-        let result = iterative_deepening(&board, 6, SearchConfig::default(), None, |d, _, _, _| {
+        let result = iterative_deepening(&board, 6, SearchConfig::default(), None, |d, _, _, _, _| {
             last_depth = d;
         })
         .unwrap();
@@ -1378,7 +1437,7 @@ mod tests {
             5,
             SearchConfig::default(),
             Some(past),
-            |_, _, _, _| count += 1,
+            |_, _, _, _, _| count += 1,
         );
         assert_eq!(count, 0);
         assert!(result.is_none());
@@ -1470,7 +1529,7 @@ mod tests {
             stop: Some(stop),
         };
         let mut tt = TranspositionTable::default_size();
-        let mut on_iter = |_: u32, _: Move, _: i32, _: Duration| {};
+        let mut on_iter = |_: u32, _: Move, _: i32, _: Duration, _: u64| {};
         let result =
             iterative_deepening_with_abort(
                 &board,
@@ -1498,7 +1557,7 @@ mod tests {
             None,
             &mut tt_a,
             &[],
-            |_, _, _, _| {},
+            |_, _, _, _, _| {},
         )
         .unwrap();
         let without_asp = iterative_deepening_with_tt(
@@ -1508,7 +1567,7 @@ mod tests {
             None,
             &mut tt_b,
             &[],
-            |_, _, _, _| {},
+            |_, _, _, _, _| {},
         )
         .unwrap();
         assert_eq!(with_asp.1, without_asp.1);
@@ -1528,7 +1587,7 @@ mod tests {
             None,
             &mut tt,
             &[],
-            |_, _, _, _| {},
+            |_, _, _, _, _| {},
         )
         .unwrap();
         assert_eq!(result.1, MATE_SCORE - 1);

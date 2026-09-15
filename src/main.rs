@@ -12,6 +12,11 @@ fn main() {
         crate::torte::tune::run(&args[2], epochs, lambda);
         return;
     }
+    if args.get(1).map(String::as_str) == Some("bench") {
+        crate::torte::movegen::magic::init();
+        crate::torte::bench::run(args.get(2).and_then(|d| d.parse().ok()).unwrap_or(8));
+        return;
+    }
     let mut torte = Torte::new();
     torte.run();
 }
