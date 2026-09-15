@@ -105,6 +105,7 @@ pub struct SearchConfig {
     pub king_attack: bool,
     pub late_move_pruning: bool,
     pub delta_pruning: bool,
+    pub tt_depth_preferred: bool,
 }
 
 impl Default for SearchConfig {
@@ -131,6 +132,7 @@ impl Default for SearchConfig {
             king_attack: true,
             late_move_pruning: true,
             delta_pruning: true,
+            tt_depth_preferred: true,
             // Razoring is off by default — see RAZOR_MAX_DEPTH note. Toggle
             // on via `setoption name Razoring value true` for experiments.
             razoring: false,
@@ -535,7 +537,8 @@ pub fn find_best_move_with_window(
             best_move: Some(best_move),
             depth: depth.min(u8::MAX as u32) as u8,
             bound: Bound::Exact,
-        });
+            generation: 0,
+        }, config.tt_depth_preferred);
     }
 
     path.pop();
@@ -844,7 +847,8 @@ fn negamax_inner(
                     best_move: Some(m),
                     depth: depth.min(u8::MAX as u32) as u8,
                     bound: Bound::LowerBound,
-                });
+                    generation: 0,
+                }, config.tt_depth_preferred);
             }
             return beta;
         }
@@ -866,7 +870,8 @@ fn negamax_inner(
             best_move: Some(best_move),
             depth: depth.min(u8::MAX as u32) as u8,
             bound,
-        });
+            generation: 0,
+        }, config.tt_depth_preferred);
     }
 
     alpha

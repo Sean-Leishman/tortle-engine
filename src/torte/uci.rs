@@ -161,6 +161,10 @@ fn emit_options(config: &SearchConfig) {
         config.development
     ));
     emit(&format!(
+        "option name TTDepthPreferred type check default {}",
+        config.tt_depth_preferred
+    ));
+    emit(&format!(
         "option name LateMovePruning type check default {}",
         config.late_move_pruning
     ));
@@ -278,6 +282,11 @@ pub fn apply_setoption(args: &str, config: &mut SearchConfig, tt: &mut Transposi
                 config.development = b;
             }
         }
+        "TTDepthPreferred" => {
+            if let Some(b) = parse_bool(&value) {
+                config.tt_depth_preferred = b;
+            }
+        }
         "LateMovePruning" => {
             if let Some(b) = parse_bool(&value) {
                 config.late_move_pruning = b;
@@ -359,6 +368,8 @@ fn handle_go(
     let deadline = args
         .time_budget_ms
         .map(|ms| start + Duration::from_millis(ms));
+    // Age the TT so this search's entries outrank the previous search's.
+    tt.new_search();
 
     let result = if config.iterative_deepening {
         iterative_deepening_with_tt(

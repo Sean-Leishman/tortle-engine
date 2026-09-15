@@ -23,11 +23,14 @@ pub struct TTEntry {
     pub best_move: Option<Move>,
     pub depth: u8,
     pub bound: Bound,
+    /// Which search wrote this. Set by `store`; callers leave it 0.
+    pub generation: u8,
 }
 
 pub struct TranspositionTable {
     table: Vec<Option<TTEntry>>,
     mask: usize,
+    generation: u8,
 }
 
 impl TranspositionTable {
@@ -42,6 +45,7 @@ impl TranspositionTable {
         Self {
             table: vec![None; count],
             mask: count - 1,
+            generation: 0,
         }
     }
 
@@ -57,9 +61,32 @@ impl TranspositionTable {
         }
     }
 
-    pub fn store(&mut self, entry: TTEntry) {
+    /// Bump the age counter. Called once per search so that entries from
+    /// earlier searches lose their depth privilege — without this a deep
+    /// entry from ten moves ago outranks everything the current search finds
+    /// and the table stops accepting new work.
+    pub fn new_search(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+    }
+
+    /// `depth_preferred`: keep the deeper entry when two positions collide,
+    /// instead of always overwriting. Same position, or an entry from an
+    /// older search, is always replaced.
+    pub fn store(&mut self, mut entry: TTEntry, depth_preferred: bool) {
+        entry.generation = self.generation;
         let idx = (entry.key as usize) & self.mask;
-        self.table[idx] = Some(entry);
+        let replace = match &self.table[idx] {
+            None => true,
+            Some(old) => {
+                !depth_preferred
+                    || old.key == entry.key
+                    || old.generation != self.generation
+                    || entry.depth >= old.depth
+            }
+        };
+        if replace {
+            self.table[idx] = Some(entry);
+        }
     }
 
     pub fn clear(&mut self) {
@@ -302,11 +329,32 @@ mod tests {
             best_move: None,
             depth: 5,
             bound: Bound::Exact,
-        });
+            generation: 0,
+        }, true);
         let entry = tt.probe(0x1234_5678).unwrap();
         assert_eq!(entry.score, 42);
         assert_eq!(entry.depth, 5);
         assert_eq!(entry.bound, Bound::Exact);
+    }
+
+    #[test]
+    fn depth_preferred_keeps_the_deeper_entry_within_a_search() {
+        let mut tt = TranspositionTable::new(1);
+        let deep = TTEntry { key: 1, score: 10, best_move: None, depth: 8, bound: Bound::Exact, generation: 0 };
+        // Same slot, different position: 1 + table size collides with key 1.
+        let shallow = TTEntry { key: 1 + (tt.mask as u64 + 1), score: 20, depth: 2, ..deep };
+        tt.store(deep, true);
+        tt.store(shallow, true);
+        assert_eq!(tt.probe(1).map(|e| e.score), Some(10), "deeper entry should survive");
+        // An entry from an older search has no such privilege.
+        tt.new_search();
+        tt.store(shallow, true);
+        assert!(tt.probe(1).is_none(), "stale deep entry should be replaceable");
+        // With the toggle off, the last writer always wins.
+        let mut tt = TranspositionTable::new(1);
+        tt.store(deep, false);
+        tt.store(shallow, false);
+        assert!(tt.probe(1).is_none());
     }
 
     #[test]
@@ -318,7 +366,8 @@ mod tests {
             best_move: None,
             depth: 1,
             bound: Bound::Exact,
-        });
+            generation: 0,
+        }, true);
         assert!(tt.probe(0x1234).is_some());
         tt.clear();
         assert!(tt.probe(0x1234).is_none());
