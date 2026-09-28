@@ -13,6 +13,7 @@
 #   ELO0, ELO1   nElo bounds: H0 = new is no better than ELO0, H1 = at least ELO1 (default 0, 10)
 #   TC           time control (default 10+0.1)
 #   CONCURRENCY  parallel games (default: nproc)
+#   ROUNDS       hard cap on rounds, 2 games each (default 20000 — effectively "until SPRT decides")
 #   FORCE=1      run even when the machine is already busy
 #
 # Result: "H1 accepted" = keep it, "H0 accepted" = it doesn't gain ELO1.
@@ -26,6 +27,7 @@ ELO0="${ELO0:-0}"
 ELO1="${ELO1:-10}"
 TC="${TC:-10+0.1}"
 CONCURRENCY="${CONCURRENCY:-$(nproc)}"
+ROUNDS="${ROUNDS:-20000}"
 
 for f in "$NEW" "$BASE" ./fastchess books/noob_3moves.epd; do
   [[ -e "$f" ]] || { echo "missing: $f  (see README.md)" >&2; exit 1; }
@@ -41,14 +43,14 @@ fi
 mkdir -p results
 STAMP="$(date +%Y%m%d-%H%M%S)"
 LOG="results/sprt-$STAMP.log"
-echo "sprt: $NEW vs $BASE  |  nElo [$ELO0, $ELO1]  TC=$TC  concurrency=$CONCURRENCY  log -> $LOG"
+echo "sprt: $NEW vs $BASE  |  nElo [$ELO0, $ELO1]  TC=$TC  concurrency=$CONCURRENCY  max rounds=$ROUNDS  log -> $LOG"
 
 ./fastchess \
   -engine name=new cmd="$NEW" \
   -engine name=base cmd="$BASE" \
   -each tc="$TC" \
   -openings file=books/noob_3moves.epd format=epd order=random \
-  -rounds 20000 -games 2 -repeat \
+  -rounds "$ROUNDS" -games 2 -repeat \
   -concurrency "$CONCURRENCY" \
   -recover \
   -sprt elo0="$ELO0" elo1="$ELO1" alpha=0.05 beta=0.05 model=normalized \
