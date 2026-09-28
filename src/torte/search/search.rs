@@ -109,6 +109,8 @@ pub struct SearchConfig {
     pub tt_depth_preferred: bool,
     pub qsearch_check_evasions: bool,
     pub see_pruning: bool,
+    /// Half-width of the aspiration window in centipawns.
+    pub aspiration_delta: i32,
 }
 
 impl Default for SearchConfig {
@@ -138,6 +140,7 @@ impl Default for SearchConfig {
             tt_depth_preferred: true,
             qsearch_check_evasions: true,
             see_pruning: true,
+            aspiration_delta: ASPIRATION_DELTA,
             // Razoring is off by default — see RAZOR_MAX_DEPTH note. Toggle
             // on via `setoption name Razoring value true` for experiments.
             razoring: false,
@@ -165,7 +168,12 @@ impl SearchConfig {
 /// Tactical mid-game positions can swing >50cp between iterations, so we
 /// use 100 to make fail-high/low rare; the trade-off is a slightly wider
 /// (less productive) window when aspiration succeeds.
-const ASPIRATION_DELTA: i32 = 100;
+/// Default half-width of the aspiration window, in centipawns. Narrow is
+/// faster but not free: a narrow beta makes null-move pruning fire far more
+/// often, and a score that lands inside the window is accepted without a
+/// re-search — so the reported score, and occasionally the chosen move,
+/// depend on the window width. See the 2026-09-16 log entry.
+pub const ASPIRATION_DELTA: i32 = 100;
 
 /// Skip aspiration windowing below this depth. Shallow iterations are fast
 /// regardless, and their score is least stable — narrow-windowing them
@@ -429,8 +437,8 @@ fn search_one_iteration(
         }
     };
 
-    let alpha = prev_score - ASPIRATION_DELTA;
-    let beta = prev_score + ASPIRATION_DELTA;
+    let alpha = prev_score - config.aspiration_delta;
+    let beta = prev_score + config.aspiration_delta;
     let result = find_best_move_with_window(
         board, depth, alpha, beta, config, tt, killers, history, path, abort, nodes,
     )?;

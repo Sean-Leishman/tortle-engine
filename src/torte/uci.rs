@@ -189,6 +189,10 @@ fn emit_options(config: &SearchConfig) {
         config.king_attack
     ));
     emit(&format!(
+        "option name AspirationDelta type spin default {} min 10 max 2000",
+        config.aspiration_delta
+    ));
+    emit(&format!(
         "option name Hash type spin default {} min {} max {}",
         DEFAULT_HASH_MB, MIN_HASH_MB, MAX_HASH_MB
     ));
@@ -323,6 +327,11 @@ pub fn apply_setoption(args: &str, config: &mut SearchConfig, tt: &mut Transposi
         "KingAttack" => {
             if let Some(b) = parse_bool(&value) {
                 config.king_attack = b;
+            }
+        }
+        "AspirationDelta" => {
+            if let Ok(cp) = value.trim().parse::<i32>() {
+                config.aspiration_delta = cp.clamp(10, 2000);
             }
         }
         "Hash" => {
