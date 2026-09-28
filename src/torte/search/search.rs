@@ -764,20 +764,31 @@ fn negamax_inner(
             se + futility_margin(depth) <= alpha
         };
 
+    // Counts only the quiet moves tried so far. Late move pruning is defined
+    // over quiets, and `move_index` is not that: ordering puts the TT move and
+    // every capture first, so in a position with 8 captures a depth-1 node
+    // would find every quiet move already past the threshold and prune the
+    // lot — silently turning the node into a capture-only search. That bug
+    // shipped in the 2026-09-16 batch and is the leading suspect for its
+    // −78 Elo (see the 2026-09-28 log entry).
+    let mut quiet_index = 0_usize;
     for (move_index, m) in moves.into_iter().enumerate() {
-        // Late move pruning: deep in a badly-ordered move list at shallow
-        // depth, a quiet move is unlikely to be the best one. ponytail: does
-        // not exempt checking moves — testing that costs a make-move per
-        // candidate, which is what this is trying to save.
+        let is_quiet = !is_capture(board, m) && m.get_promotion().is_none();
+        // Late move pruning: deep into the quiet moves at shallow depth, the
+        // rest are unlikely to be best. ponytail: does not exempt checking
+        // moves — testing that costs a make-move per candidate, which is what
+        // this is trying to save.
         if config.late_move_pruning
             && depth <= LMP_MAX_DEPTH
             && !node_in_check
             && in_safe_window
-            && move_index >= LMP_MOVE_COUNT[depth as usize]
-            && !is_capture(board, m)
-            && m.get_promotion().is_none()
+            && is_quiet
+            && quiet_index >= LMP_MOVE_COUNT[depth as usize]
         {
             continue;
+        }
+        if is_quiet {
+            quiet_index += 1;
         }
         if futility_prune
             && move_index > 0
