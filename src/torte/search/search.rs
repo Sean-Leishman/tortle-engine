@@ -135,7 +135,10 @@ impl Default for SearchConfig {
             development: true,
             rook_open_file: true,
             king_attack: true,
-            late_move_pruning: true,
+            // Measured −132 ± 38 Elo over 284 games (2026-09-29), same binary
+            // both sides. Off until the thresholds are re-tuned for the
+            // corrected quiet-move counting; see the work log.
+            late_move_pruning: false,
             delta_pruning: true,
             tt_depth_preferred: true,
             qsearch_check_evasions: true,
