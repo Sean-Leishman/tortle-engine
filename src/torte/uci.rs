@@ -189,6 +189,14 @@ fn emit_options(config: &SearchConfig) {
         config.king_attack
     ));
     emit(&format!(
+        "option name LmpBase type spin default {} min 0 max 64",
+        config.lmp_base
+    ));
+    emit(&format!(
+        "option name LmpMaxDepth type spin default {} min 1 max 10",
+        config.lmp_max_depth
+    ));
+    emit(&format!(
         "option name AspirationDelta type spin default {} min 10 max 2000",
         config.aspiration_delta
     ));
@@ -327,6 +335,16 @@ pub fn apply_setoption(args: &str, config: &mut SearchConfig, tt: &mut Transposi
         "KingAttack" => {
             if let Some(b) = parse_bool(&value) {
                 config.king_attack = b;
+            }
+        }
+        "LmpBase" => {
+            if let Ok(v) = value.trim().parse::<i32>() {
+                config.lmp_base = v.clamp(0, 64);
+            }
+        }
+        "LmpMaxDepth" => {
+            if let Ok(v) = value.trim().parse::<u32>() {
+                config.lmp_max_depth = v.clamp(1, 10);
             }
         }
         "AspirationDelta" => {

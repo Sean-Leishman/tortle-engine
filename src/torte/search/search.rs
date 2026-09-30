@@ -105,6 +105,10 @@ pub struct SearchConfig {
     pub rook_open_file: bool,
     pub king_attack: bool,
     pub late_move_pruning: bool,
+    /// Quiet-move budget at depth d is `lmp_base + d²`.
+    pub lmp_base: i32,
+    /// Deepest depth at which late move pruning applies.
+    pub lmp_max_depth: u32,
     pub delta_pruning: bool,
     pub tt_depth_preferred: bool,
     pub qsearch_check_evasions: bool,
@@ -139,6 +143,8 @@ impl Default for SearchConfig {
             // both sides. Off until the thresholds are re-tuned for the
             // corrected quiet-move counting; see the work log.
             late_move_pruning: false,
+            lmp_base: LMP_BASE,
+            lmp_max_depth: LMP_MAX_DEPTH,
             delta_pruning: true,
             tt_depth_preferred: true,
             qsearch_check_evasions: true,
@@ -211,8 +217,16 @@ const FUTILITY_MAX_DEPTH: u32 = 2;
 
 /// Late move pruning: past these move counts at shallow depth, quiet moves are
 /// skipped outright rather than reduced. Indexed by depth (0 unused).
-const LMP_MAX_DEPTH: u32 = 3;
-const LMP_MOVE_COUNT: [usize; 4] = [0, 6, 10, 16];
+/// Late move pruning budget: how many *quiet* moves get searched at a given
+/// depth before the rest are skipped. `base + depth²` is the usual shape; the
+/// old hardcoded 6/10/16 at depths 1-3 corresponds to base ≈ 5, and measured
+/// −132 Elo, so both knobs are UCI-tunable rather than baked in.
+pub const LMP_BASE: i32 = 5;
+pub const LMP_MAX_DEPTH: u32 = 3;
+
+fn lmp_quiet_budget(base: i32, depth: u32) -> usize {
+    (base + (depth * depth) as i32).max(1) as usize
+}
 
 /// Delta pruning margin in qsearch: a capture that can't lift the stand-pat
 /// score to within this of alpha isn't worth searching.
@@ -782,11 +796,11 @@ fn negamax_inner(
         // moves — testing that costs a make-move per candidate, which is what
         // this is trying to save.
         if config.late_move_pruning
-            && depth <= LMP_MAX_DEPTH
+            && depth <= config.lmp_max_depth
             && !node_in_check
             && in_safe_window
             && is_quiet
-            && quiet_index >= LMP_MOVE_COUNT[depth as usize]
+            && quiet_index >= lmp_quiet_budget(config.lmp_base, depth)
         {
             continue;
         }
