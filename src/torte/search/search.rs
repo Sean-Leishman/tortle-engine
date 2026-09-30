@@ -1106,14 +1106,25 @@ fn killer_slice(killers: &KillerTable, ply: u32, config: SearchConfig) -> [Optio
 /// Material the capture wins outright: the victim, plus the promotion gain.
 /// Ignores the recapture — that's the margin's job.
 fn captured_value(board: &Board, mv: Move) -> i32 {
-    let dest = mv.get_dest().to_usize();
+    let dest_sq = mv.get_dest();
+    let dest = dest_sq.to_usize();
     let opp_off = if board.side_to_move == Color::White { 6 } else { 0 };
+    let our_off = if board.side_to_move == Color::White { 0 } else { 6 };
     let mut value = 0;
     for i in 0..6 {
         if board.bbs[opp_off + i].get(dest) {
             value = PIECE_VALUES[i];
             break;
         }
+    }
+    // En passant takes a pawn that is *not* on the destination square, so the
+    // loop above finds nothing and the capture looks like it wins zero
+    // material — which had delta pruning discarding ep captures too eagerly.
+    if value == 0
+        && board.en_passant == Some(dest_sq)
+        && board.bbs[our_off].get(mv.get_src().to_usize())
+    {
+        value = PIECE_VALUES[0];
     }
     if mv.get_promotion().is_some() {
         value += PIECE_VALUES[4] - PIECE_VALUES[0];
@@ -1429,6 +1440,16 @@ mod tests {
             depths.push(d);
         });
         assert_eq!(depths, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn captured_value_counts_the_en_passant_pawn() {
+        // Black has just played d7d5; exd6 e.p. wins a pawn, but the captured
+        // pawn sits on d5, not on the destination square d6.
+        let board = pos("4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 2");
+        assert_eq!(captured_value(&board, Move::from_uci("e5d6")), PIECE_VALUES[0]);
+        // A plain quiet push wins nothing.
+        assert_eq!(captured_value(&board, Move::from_uci("e5e6")), 0);
     }
 
     #[test]
