@@ -788,34 +788,37 @@ fn negamax_inner(
     // lot — silently turning the node into a capture-only search. That bug
     // shipped in the 2026-09-16 batch and is the leading suspect for its
     // −78 Elo (see the 2026-09-28 log entry).
+    let lmp_killers = killer_slice(killers, ply, config);
     let mut quiet_index = 0_usize;
     for (move_index, m) in moves.into_iter().enumerate() {
         let is_quiet = !is_capture(board, m) && m.get_promotion().is_none();
+        if futility_prune && move_index > 0 && is_quiet {
+            continue;
+        }
         // Late move pruning: deep into the quiet moves at shallow depth, the
-        // rest are unlikely to be best. ponytail: does not exempt checking
-        // moves — testing that costs a make-move per candidate, which is what
-        // this is trying to save.
-        if config.late_move_pruning
+        // rest are unlikely to be best. Threshold tuning alone could not make
+        // this a gain (2026-10-04: −132 to −36 Elo across every budget), so it
+        // now carries the guards the budget-only version lacked — a killer is
+        // never pruned, and nor is a move that gives check, because there the
+        // reply is forced and the line can swing sharply. Testing for check
+        // needs the move made first, so the decision moved below `apply_move`;
+        // that still saves the subtree, just not the make-move.
+        let lmp_eligible = config.late_move_pruning
             && depth <= config.lmp_max_depth
             && !node_in_check
             && in_safe_window
             && is_quiet
             && quiet_index >= lmp_quiet_budget(config.lmp_base, depth)
-        {
+            && lmp_killers[0] != Some(m)
+            && lmp_killers[1] != Some(m);
+        let mut next = *board;
+        next.apply_move(m).unwrap();
+        if lmp_eligible && !in_check(&next) {
             continue;
         }
         if is_quiet {
             quiet_index += 1;
         }
-        if futility_prune
-            && move_index > 0
-            && !is_capture(board, m)
-            && m.get_promotion().is_none()
-        {
-            continue;
-        }
-        let mut next = *board;
-        next.apply_move(m).unwrap();
         let do_lmr = config.late_move_reductions
             && depth >= LMR_MIN_DEPTH
             && move_index >= LMR_MIN_MOVE_IDX
