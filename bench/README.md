@@ -35,8 +35,12 @@ mkdir -p engines
 git clone --depth 1 https://github.com/rofl0r/sungorus.git sungorus-src
 make -C sungorus-src && cp sungorus-src/sungorus engines/sungorus
 
-git clone --depth 1 https://github.com/bluefeversoft/vice.git vice-src
-make -C vice-src/Vice11/src && cp vice-src/Vice11/src/vice engines/vice
+# Vice: DOES NOT BUILD on modern glibc (tried 2026-10-04). Its bundled
+# tinycthread is a C11-threads shim that collides with glibc's native
+# <threads.h>; upstream's `#define once_flag pthread_once_t` is a macro, so it
+# rewrites glibc's own typedef into a conflicting one, and past that mtx_t /
+# cnd_t / mtx_init all clash too. Use Stockfish at a capped UCI_Elo instead as
+# the near-strength sparring partner (below).
 
 # Stockfish 18 — pick the build matching your CPU (bmi2 here; see release page)
 curl -sSL -o sf.tar https://github.com/official-stockfish/Stockfish/releases/download/sf_18/stockfish-ubuntu-x86-64-bmi2.tar
@@ -83,8 +87,8 @@ current CCRL list:
 
 | Opponent | ~CCRL Blitz |
 |----------|-------------|
-| Sungorus 1.4 | ~2000 |
-| Vice 1.1 | ~1800 |
+| Sungorus 1.4 | ~2000 | the anchor |
+| Vice 1.1 | — | unbuildable on modern glibc, see above |
 | SF18 @ UCI_Elo 1500 / 1800 / 2100 | self-reported; poorly calibrated at the low end — use as a *relative* bracket, not an anchor |
 
 ## Caveats
