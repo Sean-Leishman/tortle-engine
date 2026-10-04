@@ -15,8 +15,12 @@ drawn from the strong-engine playbook, in rough priority order.
    ≥ beta, prune. Substantial speedup, but needs zugzwang/endgame guards.
 4. **UCI `Hash` spin option** — let GUIs configure TT size. The 16 MB default
    is fine, but tournaments often request 128/256 MB.
-5. **Incremental Zobrist hashing in `apply_move`** — avoid re-hashing the
-   whole board each node. Probably ~20% speedup overall.
+5. ~~**Incremental Zobrist hashing in `apply_move`**~~ — landed 2026-05-11,
+   and measured a wash on 2026-10-04: a from-scratch recompute runs once per
+   node, the incremental update ~35 times per node inside the legality
+   filter, so neither is faster than the other. What would actually pay is
+   pin-aware legal move generation, so movegen stops copying a board per
+   move.
 6. **Mid-search abort** — let `stop` and the time deadline interrupt within an
    iteration (atomic flag checked at every node). Currently the deadline is
    only checked between ID iterations.
@@ -39,9 +43,10 @@ No killers/history, null-move pruning, LMR, or aspiration windows. No
 mid-search abort — the deadline is only checked between ID iterations.
 
 ### Transposition table
-The Zobrist hash is recomputed from scratch each node (no incremental update
-on `apply_move`). Always-replace eviction. Size hardcoded at 16 MB — no UCI
-`Hash` spin option.
+Single-entry buckets (no two-tier/bucketed replacement). *(Historical: the
+always-replace eviction, the hardcoded 16 MB size and the from-scratch hash
+listed here have all since landed — depth-preferred replacement 2026-09-16,
+the `Hash` spin option, and incremental Zobrist hashing 2026-05-11.)*
 
 ### Quiescence
 Stand-pats even when in check (no check-evasion handling); skips

@@ -210,6 +210,14 @@ mod tests {
     }
 
     #[test]
+    fn fresh_board_hash_matches_recompute() {
+        // `Board::new()` must satisfy the same invariant as `parse`:
+        // `zobrist` is the from-scratch hash of the position it describes.
+        let board = Board::new();
+        assert_eq!(board.zobrist, zobrist_hash(&board));
+    }
+
+    #[test]
     fn hash_is_deterministic() {
         let board = b("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
         assert_eq!(zobrist_hash(&board), zobrist_hash(&board));
@@ -238,27 +246,68 @@ mod tests {
         assert_ne!(zobrist_hash(&full), zobrist_hash(&none));
     }
 
-    #[test]
-    fn incremental_hash_matches_perft_kiwipete_d3() {
-        // Walk the entire legal-move tree of kiwipete to depth 3 and verify
-        // board.zobrist == zobrist_hash(&board) at every visited position.
+    /// Perft-style walk: assert the incrementally maintained key equals the
+    /// from-scratch recomputation at *every* node of the tree.
+    fn walk_checking_hash(board: &Board, depth: u32) -> u64 {
         use crate::torte::movegen::generator::generate_legal_moves;
+        assert_eq!(
+            board.zobrist,
+            zobrist_hash(board),
+            "incremental hash drifted from the recomputation at\n{:?}",
+            board
+        );
+        if depth == 0 {
+            return 1;
+        }
+        let mut nodes = 1;
+        for m in generate_legal_moves(board) {
+            let mut next = *board;
+            next.apply_move(m)
+                .unwrap_or_else(|e| panic!("legal move {} failed to apply: {}", m, e));
+            nodes += walk_checking_hash(&next, depth - 1);
+        }
+        nodes
+    }
+
+    #[test]
+    fn incremental_hash_matches_recompute_at_every_perft_node() {
+        // The oracle test for incremental Zobrist: ~470k positions across six
+        // trees chosen so that every state component the from-scratch hash
+        // covers actually changes somewhere in the walk.
         use crate::torte::movegen::magic;
         magic::init();
-        let board = b("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1");
-
-        fn walk(board: &Board, depth: u32) {
-            assert_eq!(board.zobrist, zobrist_hash(board), "drift detected");
-            if depth == 0 {
-                return;
-            }
-            for m in generate_legal_moves(board) {
-                let mut next = *board;
-                next.apply_move(m).unwrap();
-                walk(&next, depth - 1);
-            }
+        let cases: &[(&str, u32)] = &[
+            // Startpos: double pushes setting and clearing the ep square.
+            ("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", 4),
+            // Kiwipete: castling available both sides and for both colours,
+            // rooks on their home squares to be captured or moved.
+            (
+                "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+                3,
+            ),
+            // Perft position 3: en-passant captures and pawn races.
+            ("8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1", 4),
+            // Perft position 4: capture-promotions (b2xa1, a7xb8) plus castling.
+            (
+                "r3k2r/Pppp1ppp/1b3nbN/nP6/BBP1P3/q4N2/Pp1P2PP/R2Q1RK1 w kq - 0 1",
+                3,
+            ),
+            // Perft position 5: promotions with rights still live on one side.
+            ("rnbq1k1r/pp1Pbppp/2p5/8/2B5/8/PPP1NnPP/RNBQK2R w KQ - 1 8", 3),
+            // Bare rooks and kings: castling both ways for both colours, and
+            // rook-takes-rook on a home square, which revokes a right by
+            // *capture* rather than by the rook moving.
+            ("r3k2r/8/8/8/8/8/8/R3K2R b KQkq - 0 1", 3),
+        ];
+        let mut total = 0;
+        for (fen, depth) in cases {
+            total += walk_checking_hash(&b(fen), *depth);
         }
-        walk(&board, 3);
+        assert!(
+            total > 300_000,
+            "the walk should be large enough to be convincing, visited {}",
+            total
+        );
     }
 
     #[test]
@@ -300,6 +349,20 @@ mod tests {
             ("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1", "e1g1"),
             // rook move (loses one castling right)
             ("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1", "a1a2"),
+            // queenside castle (other direction, rook jumps the king)
+            ("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1", "e1c1"),
+            // black castles (rights for the *other* colour are cleared)
+            ("r3k2r/8/8/8/8/8/8/R3K2R b KQkq - 0 1", "e8c8"),
+            // rook captures a rook on its home square: revokes a right
+            // without the owning rook or king ever moving
+            ("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1", "a1a8"),
+            // capture-promotion to a knight (both the captured piece and the
+            // promoted piece differ from the mover)
+            ("1n2k3/P7/8/8/8/8/8/4K3 w - - 0 1", "a7b8n"),
+            // double push that *replaces* an existing ep square with a new one
+            ("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1", "d7d5"),
+            // quiet move that clears a standing ep square
+            ("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1", "b8c6"),
         ];
         for (fen, mv) in cases {
             let mut board = b(fen);

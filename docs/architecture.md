@@ -109,7 +109,7 @@ Currently:
 - `iterative_deepening: bool` (default `true`) — instead of jumping straight to `max_depth`, search at depths 1, 2, ..., max_depth in sequence. Each iteration's result is reported via `info depth N ... pv <move>`. Short-circuits on mate detection (`|score| >= MATE_SCORE - 1000`). Aborts before any iteration that would start past the deadline (between-iteration check; mid-search abort isn't supported). Toggle via `setoption name IterativeDeepening value <true|false>`.
   - Combined with TT below, the previous iterations are no longer redundant — each ID iteration's PV is reused via TT-move-first ordering at every node.
 - `transposition_table: bool` (default `true`) — caches `(zobrist_hash, depth, score, bound, best_move)` per position in a fixed-size hash table. At each node, probes for a usable hit (sufficient depth + bound consistent with the alpha/beta window) and short-circuits if so. The TT move is always used as the move-ordering hint, even on insufficient-depth hits. Mate scores are stored as distance-from-this-node and restored to distance-from-root on probe via `store_mate_score` / `retrieve_mate_score`. Toggle via `setoption name TranspositionTable value <true|false>`.
-  - Default size 16 MB (rounded down to a power-of-two number of `Option<TTEntry>` slots). Cleared on `ucinewgame`. Hash is computed from scratch each node (no incremental update yet).
+  - Default size 16 MB (rounded down to a power-of-two number of `Option<TTEntry>` slots). Cleared on `ucinewgame`. The key is maintained incrementally by `Board::apply_move` (XOR out what left, XOR in what arrived, including castling rights, the ep file and the side flip); `zobrist_hash` remains as the from-scratch oracle the tests check it against.
   - Empirical speedup on kiwipete depth-6: 7520ms → 3395ms (~2.2×). Identical best score and PV. Saving compounds with ID — earlier iterations populate the TT so deeper iterations can reuse cached subtrees and PV moves.
 - `piece_square_tables: bool` (default `true`) — adds per-square positional bonuses (tapered MG/EG PSTs) plus mobility on top of material in `eval`. Toggle via `setoption name PieceSquareTables value <true|false>`.
   - Qualitative impact: with PST on, the engine plays `b1c3` from startpos (knight development); with PST off, it plays `a2a3` (the first move enumerated, no positional reason to prefer anything).
@@ -119,7 +119,7 @@ Currently:
 
 The list above is the original set; every toggle actually present is tabulated in `CLAUDE.md` (that table is the live one). Landed since: killers/history, null-move pruning, LMR, aspiration windows, futility, razoring (default off), mid-search abort, draw detection, `Hash` spin, tapered PSTs, and — 2026-09-15/16 — `RookOpenFile`, `KingAttack`, `LateMovePruning`, `DeltaPruning`.
 
-Still missing: incremental Zobrist hashing, check evasions in qsearch, depth-preferred TT replacement, SMP, MultiPV.
+Still missing: SMP, MultiPV. (Incremental Zobrist hashing, qsearch check evasions and depth-preferred TT replacement have all landed.)
 
 **Eval weights are no longer hand-chosen.** Every weight is a `[mg, eg]` pair in the generated `search/params.rs`, fitted by `torte tune` (see `tune.rs`); eval terms report `(weight, count)` through a `Trace` so the engine and the tuner share one code path. Values quoted below (−15 cp doubled, +30 bishop pair, …) are the pre-tuning figures kept for shape, not the current numbers.
 
