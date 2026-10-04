@@ -58,7 +58,7 @@ pub struct Board {
 
 impl Board {
     pub fn new() -> Board {
-        Board {
+        let mut board = Board {
             bbs: [Bitboard::empty(); 12],
             player_bbs: [Bitboard::empty(); 2],
             side_to_move: Color::White,
@@ -67,7 +67,11 @@ impl Board {
             halfmove_clock: 0,
             fullmove_number: 1,
             zobrist: 0,
-        }
+        };
+        // Even an empty board has a non-zero key (the castling-rights term),
+        // so seed it the same way `parse` does rather than leaving 0 behind.
+        board.zobrist = zobrist_hash(&board);
+        board
     }
 
     pub fn apply_uci_move(&mut self, move_str: &str) -> Result<(), std::io::Error> {
@@ -84,6 +88,25 @@ impl Board {
     }
 
     pub fn apply_move(&mut self, piece_move: Move) -> Result<(), std::io::Error> {
+        self.apply_move_impl::<true>(piece_move)
+    }
+
+    /// Like `apply_move`, but leaves `zobrist` stale. Only for scratch boards
+    /// whose hash is never read: `generate_legal_moves` applies every
+    /// pseudo-legal move to a copy just to test king safety and throws it
+    /// away, which happens ~35× per search node — far more often than the
+    /// search actually needs a key.
+    pub(crate) fn apply_move_unhashed(
+        &mut self,
+        piece_move: Move,
+    ) -> Result<(), std::io::Error> {
+        self.apply_move_impl::<false>(piece_move)
+    }
+
+    fn apply_move_impl<const HASH: bool>(
+        &mut self,
+        piece_move: Move,
+    ) -> Result<(), std::io::Error> {
         let from = piece_move.get_src();
         let to = piece_move.get_dest();
         let piece = self.piece_at_sq(from)?;
@@ -139,9 +162,12 @@ impl Board {
         self.bbs[dest_piece_idx].set(to_idx);
         self.player_bbs[mover_idx].clear(from_idx);
         self.player_bbs[mover_idx].set(to_idx);
-        // Hash: remove moving piece from `from`, add (possibly promoted) piece on `to`.
-        self.zobrist ^= piece_key(piece.to_index(), from_idx);
-        self.zobrist ^= piece_key(dest_piece_idx, to_idx);
+        if HASH {
+            // Remove the moving piece from `from`, add the (possibly
+            // promoted) piece on `to`.
+            self.zobrist ^= piece_key(piece.to_index(), from_idx);
+            self.zobrist ^= piece_key(dest_piece_idx, to_idx);
+        }
 
         if is_ep_capture {
             let cap_idx = match mover {
@@ -155,7 +181,9 @@ impl Board {
             .to_index();
             self.bbs[opp_pawn_idx].clear(cap_idx);
             self.player_bbs[opp_idx].clear(cap_idx);
-            self.zobrist ^= piece_key(opp_pawn_idx, cap_idx);
+            if HASH {
+                self.zobrist ^= piece_key(opp_pawn_idx, cap_idx);
+            }
         } else if is_normal_capture {
             let opp_range = match mover.opposite() {
                 Color::White => 0..6,
@@ -164,7 +192,9 @@ impl Board {
             for i in opp_range {
                 if self.bbs[i].get(to_idx) {
                     self.bbs[i].clear(to_idx);
-                    self.zobrist ^= piece_key(i, to_idx);
+                    if HASH {
+                        self.zobrist ^= piece_key(i, to_idx);
+                    }
                     break;
                 }
             }
@@ -193,8 +223,10 @@ impl Board {
             self.bbs[rook_idx].set(rook_to);
             self.player_bbs[mover_idx].clear(rook_from);
             self.player_bbs[mover_idx].set(rook_to);
-            self.zobrist ^= piece_key(rook_idx, rook_from);
-            self.zobrist ^= piece_key(rook_idx, rook_to);
+            if HASH {
+                self.zobrist ^= piece_key(rook_idx, rook_from);
+                self.zobrist ^= piece_key(rook_idx, rook_to);
+            }
         }
 
         if is_king {
@@ -236,20 +268,23 @@ impl Board {
         }
         self.side_to_move = self.side_to_move.opposite();
 
-        // Hash: castling-rights and ep-file deltas (XOR old out, new in), then side flip.
-        if old_castling != self.castling.0 {
-            self.zobrist ^= castling_key(old_castling);
-            self.zobrist ^= castling_key(self.castling.0);
-        }
-        if old_ep != self.en_passant {
-            if let Some(ep) = old_ep {
-                self.zobrist ^= ep_file_key(ep.0 % 8);
+        // Hash: castling-rights and ep-file deltas (XOR old out, new in),
+        // then the side flip.
+        if HASH {
+            if old_castling != self.castling.0 {
+                self.zobrist ^= castling_key(old_castling);
+                self.zobrist ^= castling_key(self.castling.0);
             }
-            if let Some(ep) = self.en_passant {
-                self.zobrist ^= ep_file_key(ep.0 % 8);
+            if old_ep != self.en_passant {
+                if let Some(ep) = old_ep {
+                    self.zobrist ^= ep_file_key(ep.0 % 8);
+                }
+                if let Some(ep) = self.en_passant {
+                    self.zobrist ^= ep_file_key(ep.0 % 8);
+                }
             }
+            self.zobrist ^= side_key();
         }
-        self.zobrist ^= side_key();
 
         Ok(())
     }

@@ -63,7 +63,8 @@ pub fn generate_legal_moves(board: &Board) -> Vec<Move> {
     let opp = us.opposite();
     moves.retain(|&m| {
         let mut next = *board;
-        if next.apply_move(m).is_err() {
+        // Hash is never read on this copy — skip the Zobrist update.
+        if next.apply_move_unhashed(m).is_err() {
             return false;
         }
         match king_square(&next, us) {
