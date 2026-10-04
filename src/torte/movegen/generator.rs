@@ -60,19 +60,37 @@ pub fn generate_legal_moves(board: &Board) -> Vec<Move> {
     let mut moves = Vec::with_capacity(64);
     generate_pseudo_legal(board, &mut moves);
     let us = board.side_to_move;
-    let opp = us.opposite();
     moves.retain(|&m| {
         let mut next = *board;
         // Hash is never read on this copy — skip the Zobrist update.
         if next.apply_move_unhashed(m).is_err() {
             return false;
         }
-        match king_square(&next, us) {
-            Some(k) => !is_attacked(&next, k, opp),
-            None => true,
-        }
+        own_king_safe(&next, us)
     });
     moves
+}
+
+/// Pseudo-legal moves: every move the pieces can make, without checking
+/// whether it leaves our own king attacked. The search filters these lazily —
+/// it already copies and applies each move it tries, so it tests legality on
+/// that board rather than paying a copy per move up front here (a node often
+/// generates ~35 moves and searches 1-3 of them). Castling is generated
+/// legality-checked, so castles never need the lazy test.
+pub fn generate_pseudo_legal_moves(board: &Board) -> Vec<Move> {
+    let mut moves = Vec::with_capacity(64);
+    generate_pseudo_legal(board, &mut moves);
+    moves
+}
+
+/// True if `after` — a board on which `us` has just moved — leaves our own
+/// king unattacked, i.e. the move was legal. A missing king counts as safe so
+/// that test positions without one behave as they did before.
+pub fn own_king_safe(after: &Board, us: Color) -> bool {
+    match king_square(after, us) {
+        Some(k) => !is_attacked(after, k, us.opposite()),
+        None => true,
+    }
 }
 
 fn generate_pseudo_legal(board: &Board, moves: &mut Vec<Move>) {
@@ -278,5 +296,68 @@ fn generate_castling(board: &Board, moves: &mut Vec<Move>) {
         && !is_attacked(board, qs_king_path[1], opp)
     {
         moves.push(Move::new(king_sq, qs_king_path[1]));
+    }
+}
+
+#[cfg(test)]
+mod lazy_legality_tests {
+    use super::*;
+    use crate::torte::movegen::magic;
+
+    fn pos(fen: &str) -> Board {
+        magic::init();
+        Board::parse(fen)
+    }
+
+    /// The search filters pseudo-legal moves lazily; that is only sound if
+    /// "pseudo-legal, then drop the ones leaving our king attacked" is exactly
+    /// `generate_legal_moves` — same moves, same order, since the index-based
+    /// heuristics depend on order.
+    fn assert_agrees(board: &Board) {
+        let strict = generate_legal_moves(board);
+        let lazy: Vec<Move> = generate_pseudo_legal_moves(board)
+            .into_iter()
+            .filter(|&m| {
+                let mut next = *board;
+                next.apply_move_unhashed(m).is_ok() && own_king_safe(&next, board.side_to_move)
+            })
+            .collect();
+        assert_eq!(strict, lazy, "generators disagree on {:?}", board);
+    }
+
+    fn walk(board: &Board, depth: u32, visited: &mut u64) {
+        assert_agrees(board);
+        *visited += 1;
+        if depth == 0 {
+            return;
+        }
+        for m in generate_legal_moves(board) {
+            let mut next = *board;
+            if next.apply_move(m).is_ok() {
+                walk(&next, depth - 1, visited);
+            }
+        }
+    }
+
+    #[test]
+    fn lazy_filter_equals_strict_generator_over_a_walk() {
+        // Trees chosen for the cases where legality actually bites: pins,
+        // en passant (including an ep capture that would expose the king),
+        // being in check, double check, and castling rights.
+        let trees: [(&str, u32); 6] = [
+            ("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", 3),
+            ("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1", 2),
+            ("8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1", 3),
+            ("r3k2r/Pppp1ppp/1b3nbN/nP6/BBP1P3/q4N2/Pp1P2PP/R2Q1RK1 w kq - 0 1", 2),
+            // White king on e1, black rook on e8: the e-file pawn is pinned.
+            ("4k2r/8/8/8/8/8/4P3/4K3 w k - 0 1", 3),
+            // In check from two pieces at once — only king moves are legal.
+            ("4k3/8/8/8/8/8/3qr3/4K3 w - - 0 1", 3),
+        ];
+        let mut visited = 0_u64;
+        for (fen, depth) in trees {
+            walk(&pos(fen), depth, &mut visited);
+        }
+        assert!(visited > 5_000, "walk shrank to {visited} nodes");
     }
 }

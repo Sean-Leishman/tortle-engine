@@ -1,7 +1,9 @@
 use crate::torte::board::board::Board;
 use crate::torte::board::pieces::Color;
 use crate::torte::core::piece_move::Move;
-use crate::torte::movegen::generator::{generate_legal_moves, is_attacked, king_square};
+use crate::torte::movegen::generator::{
+    generate_legal_moves, generate_pseudo_legal_moves, is_attacked, king_square, own_king_safe,
+};
 use crate::torte::search::eval::{eval, EvalConfig, PIECE_VALUES};
 use crate::torte::search::see::see;
 use crate::torte::search::transposition::{Bound, TTEntry, TranspositionTable};
@@ -756,7 +758,10 @@ fn negamax_inner(
         }
     }
 
-    let mut moves = generate_legal_moves(board);
+    // Pseudo-legal: legality is tested lazily below, on the board the search
+    // has to make anyway. A node generates ~35 moves and often searches 1-3,
+    // so filtering up front paid for ~35 board copies to serve a handful.
+    let mut moves = generate_pseudo_legal_moves(board);
     if moves.is_empty() {
         return terminal_score(board, ply);
     }
@@ -764,7 +769,9 @@ fn negamax_inner(
         order_moves(board, &mut moves, tt_move, killer_slice(killers, ply, config), history);
     }
 
+    // Set to the first *legal* move below; `moves[0]` may be illegal now.
     let mut best_move = moves[0];
+    let mut legal_moves = 0_usize;
 
     // Futility pruning eligibility (constant for this node): at frontier
     // depths, if even adding a generous margin to the static eval can't
@@ -790,11 +797,8 @@ fn negamax_inner(
     // −78 Elo (see the 2026-09-28 log entry).
     let lmp_killers = killer_slice(killers, ply, config);
     let mut quiet_index = 0_usize;
-    for (move_index, m) in moves.into_iter().enumerate() {
+    for m in moves {
         let is_quiet = !is_capture(board, m) && m.get_promotion().is_none();
-        if futility_prune && move_index > 0 && is_quiet {
-            continue;
-        }
         // Late move pruning: deep into the quiet moves at shallow depth, the
         // rest are unlikely to be best. Threshold tuning alone could not make
         // this a gain (2026-10-04: −132 to −36 Elo across every budget), so it
@@ -812,7 +816,19 @@ fn negamax_inner(
             && lmp_killers[0] != Some(m)
             && lmp_killers[1] != Some(m);
         let mut next = *board;
-        next.apply_move(m).unwrap();
+        if next.apply_move(m).is_err() || !own_king_safe(&next, board.side_to_move) {
+            continue;
+        }
+        // Index-based heuristics count *legal* moves only, so the thresholds
+        // mean the same thing they did when the generator pre-filtered.
+        let move_index = legal_moves;
+        legal_moves += 1;
+        if legal_moves == 1 {
+            best_move = m;
+        }
+        if futility_prune && move_index > 0 && is_quiet {
+            continue;
+        }
         if lmp_eligible && !in_check(&next) {
             continue;
         }
@@ -914,6 +930,13 @@ fn negamax_inner(
         }
     }
 
+    // No legal move was found: checkmate or stalemate. The pre-filtering
+    // generator used to make this `moves.is_empty()`; with lazy legality the
+    // node only knows once it has tried them all.
+    if legal_moves == 0 {
+        return terminal_score(board, ply);
+    }
+
     if config.transposition_table {
         let bound = if alpha > original_alpha {
             Bound::Exact
@@ -994,15 +1017,12 @@ fn qsearch(
         }
     }
 
-    let mut moves = generate_legal_moves(board);
-    if evading {
-        if moves.is_empty() {
-            // Checkmate, found at a leaf.
-            return terminal_score(board, ply);
-        }
-    } else {
+    // Pseudo-legal, filtered lazily in the loop (see negamax_inner).
+    let mut moves = generate_pseudo_legal_moves(board);
+    if !evading {
         moves.retain(|m| mvv_lva_score(board, *m) > 0);
     }
+    let mut legal_moves = 0_usize;
     if config.move_ordering {
         order_moves(board, &mut moves, None, [None, None], history);
     }
@@ -1023,7 +1043,10 @@ fn qsearch(
             continue;
         }
         let mut next = *board;
-        next.apply_move(m).unwrap();
+        if next.apply_move(m).is_err() || !own_king_safe(&next, board.side_to_move) {
+            continue;
+        }
+        legal_moves += 1;
         let score = -qsearch(&next, -beta, -alpha, ply + 1, config, history, abort, nodes);
         if config.mid_search_abort && abort.fire() {
             return alpha;
@@ -1034,6 +1057,12 @@ fn qsearch(
         if score > alpha {
             alpha = score;
         }
+    }
+    // While evading there is no stand-pat floor, so an empty legal-move list
+    // means mate at the leaf — the check the pre-filtering generator used to
+    // make before the loop.
+    if evading && legal_moves == 0 {
+        return terminal_score(board, ply);
     }
     alpha
 }
