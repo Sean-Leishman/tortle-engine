@@ -98,7 +98,10 @@ current CCRL list:
   worth grepping the log for `time forfeit` / `loses on time` after a run at a
   faster TC than 10+0.1.
 - SF's `UCI_Elo` is convenient but its low-end calibration is widely considered
-  unreliable — lean on Sungorus/Vice for the actual anchor, SF for bracketing.
+  unreliable — lean on Sungorus for the actual anchor (Vice is unbuildable).
+  SF at a capped `UCI_Elo` is the *relative* sparring partner: pick the setting
+  where torte scores near 50%, because that is where each game carries the most
+  information. Never quote an SF-derived figure as an absolute Elo.
 - One opening book, `order=random` — fine for absolute strength. Same opening is
   played once from each side (`-games 2 -repeat`) to cancel book bias.
 - Adjudication is on (`-draw`, `-resign`) to skip dead games; loosen it in the
