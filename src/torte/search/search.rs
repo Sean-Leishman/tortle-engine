@@ -78,7 +78,17 @@ impl AbortSignal {
 /// Every NODE_CHECK_INTERVAL nodes, consult the abort signal. AtomicBool
 /// loads are cheap, but `Instant::now()` adds up — bucketing the check keeps
 /// the deadline-check overhead well under 1% at typical nps.
-const NODE_CHECK_INTERVAL: u64 = 2048;
+///
+/// **A node budget is not a time budget.** The interval decides how often we
+/// are *allowed* to look at the clock, so the wall-clock gap between checks is
+/// whatever the machine makes of N nodes. At 2048 this produced 25-29 second
+/// overruns during a contended run on 2026-10-04 (six games forfeited at
+/// once): when nps collapses, so does the check rate, and nothing bounds the
+/// overshoot. 256 costs ~0.01% at a million nps (≈4k clock reads per second,
+/// tens of nanoseconds each) and shrinks the worst case eightfold. It cannot
+/// remove the failure mode — only checking more often narrows it — so the
+/// honest fix is to keep this small rather than to pick a clever N.
+const NODE_CHECK_INTERVAL: u64 = 256;
 
 /// Toggleable search features. New features (quiescence, iterative deepening,
 /// transposition table, ...) get added as fields here so each can be turned on
