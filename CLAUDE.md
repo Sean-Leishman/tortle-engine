@@ -188,4 +188,10 @@ These are the next likely toggles, drawn from the strong-engine playbook:
 6. **Mid-search abort** — let `stop` and time deadline interrupt within an iteration (atomic flag checked at every node).
 7. **Aspiration windows** — narrow alpha/beta windows around the previous ID iteration's score; fall back on fail-high/low. Combines well with TT.
 
+**Deferred with a written plan:** pin-aware legal move generation (option B of
+the copy-per-move work) — see `docs/future-work.md`. Gated on measuring the
+lazy-legality change on a quiet machine first, because that may already have
+banked most of the win, and because make/unmake in the search is likely the
+larger remaining lever.
+
 Then: Lazy SMP multithreading (needs a concurrent TT — the real work; ~1.5–1.8× on 4 cores), late move pruning (LMP), MultiPV.

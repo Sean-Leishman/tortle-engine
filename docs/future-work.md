@@ -30,6 +30,71 @@ drawn from the strong-engine playbook, in rough priority order.
 Then: Lazy SMP multithreading (needs a concurrent TT — the real work; expect
 ~1.5–1.8× on 4 cores), late move pruning (LMP), MultiPV.
 
+## Plan: option B — pin-aware legal move generation (deferred, gated)
+
+Option A landed 2026-10-04: the search generates pseudo-legal moves and tests
+legality lazily on the board it makes anyway, which deleted ~35 board copies
+per node. Option B is the full version — decide legality *without* making the
+move at all.
+
+**Read this first: A has probably already banked most of the win.** Before A,
+the legality filter copied and applied ~35 moves per node. After A, the only
+legality cost left is one `is_attacked` call per move the search *actually
+tries* — 1-3 per node, on a board it was going to build regardless. So B's
+marginal gain is much smaller than it looked when the copy-per-move problem was
+first spotted. **Do not start B until A is measured on a quiet machine** (A's
+own numbers are direction-only: 5 of 6 paired rounds favour it, median ratio
+0.71, spread 0.21-1.31 at load ~10). If A's real win is large, the remainder B
+chases may not be worth the bug surface.
+
+**The bigger remaining lever is probably not B at all.** The search still does
+`let mut next = *board; next.apply_move(m)` — a 120-byte copy per *searched*
+move. Replacing that with make/unmake (an undo stack carrying captured piece,
+castling rights, ep square, clocks and the Zobrist key) attacks a cost B does
+not touch. It is also the more invasive change, so measure first.
+
+### Design, if it goes ahead
+
+Per node, compute once:
+
+- `checkers` — enemy pieces attacking our king.
+- `pinned` — our pieces on a ray between our king and an enemy slider with no
+  other piece between, plus each one's allowed ray mask.
+
+Then:
+
+- **Double check** (`checkers.count() >= 2`): king moves only.
+- **Single check**: king moves to safe squares; captures of the checker; and,
+  if the checker is a slider, blocks on the king-checker ray. Plus the ep
+  capture when the checker is the pawn that just double-pushed.
+- **No check**: every move is legal except a pinned piece leaving its ray, a
+  king move into an attacked square, or an ep capture that exposes the king
+  along a rank.
+
+### The three places bugs will be
+
+1. **King-move safety must remove our own king from the occupancy** before the
+   attack test, or a slider checking along the king's current square is missed
+   when the king steps backwards along the ray.
+2. **En passant exposing the king along a rank** — king and enemy rook on the
+   same rank with both pawns between them; removing two pawns at once is the
+   case no pin mask catches.
+3. **Double check** — easy to generate a "capture the checker" reply that is
+   legal against one checker and not the other.
+
+### Verification (reuse what A built)
+
+- The differential test `lazy_filter_equals_strict_generator_over_a_walk` in
+  `generator.rs` extends directly: assert pin-aware output equals
+  `generate_legal_moves` **in the same order**, over a wider perft walk. Keep
+  the strict generator forever as the oracle.
+- **Generate in the current order**, or the index-based heuristics (futility,
+  LMP) change meaning and `bench` node totals will move.
+- Invariants: perft unchanged; `torte bench 8` node total identical
+  (1,628,363 at the time of writing). A node-count change is a bug, not a win.
+- Then knps on a quiet machine, then SPRT. Twice this fortnight a large node
+  or speed win came with no Elo, so the match is the only verdict.
+
 ## Known limitations to clean up
 
 ### Eval
