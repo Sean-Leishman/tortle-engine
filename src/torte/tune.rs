@@ -13,6 +13,7 @@ use std::thread;
 use crate::torte::board::board::Board;
 use crate::torte::board::pieces::Color;
 use crate::torte::search::eval::*;
+use crate::torte::search::search::SearchConfig;
 use crate::torte::search::params::W;
 
 const PARAMS_RS: &str = "src/torte/search/params.rs";
@@ -59,7 +60,7 @@ fn load(path: &str) -> Vec<Position> {
             let fen: Vec<&str> = line.split_whitespace().take(4).collect();
             let board = Board::parse(&format!("{} 0 1", fen.join(" ")));
             let mut c = Coeffs([0; NUM_PARAMS]);
-            trace(&board, EvalConfig::all(), &mut c);
+            trace(&board, SearchConfig::default().eval_config(), &mut c);
             let phase = game_phase(&board);
             let p = Position {
                 terms: (0..NUM_PARAMS)
@@ -70,7 +71,7 @@ fn load(path: &str) -> Vec<Position> {
                 result,
             };
             // The float model must reproduce the engine's integer eval.
-            let engine = eval(&board, EvalConfig::all())
+            let engine = eval(&board, SearchConfig::default().eval_config())
                 * if board.side_to_move == Color::White { 1 } else { -1 };
             assert!((model(&p, &w0) - engine as f64).abs() <= 1.0, "trace mismatch: {line}");
             Some(p)
@@ -173,7 +174,7 @@ pub fn run(path: &str, epochs: usize, lambda: f64) {
 }
 
 fn render(w: &[f64]) -> String {
-    const SECTIONS: [(&str, usize, usize, usize); 18] = [
+    const SECTIONS: [(&str, usize, usize, usize); 19] = [
         ("material: P N B R Q K", MATERIAL, 6, 6),
         ("pawn PST, a1..h8", PST, 64, 8),
         ("knight PST, a1..h8", PST + 64, 64, 8),
@@ -192,6 +193,7 @@ fn render(w: &[f64]) -> String {
         ("tempo", TEMPO, 1, 1),
         ("rook file: open, half-open", ROOK_OPEN_FILE, 2, 2),
         ("king attack per zone square: N B R Q", KING_ATTACK, 4, 4),
+        ("king danger by attack-unit bucket 0..15", KING_DANGER, KING_DANGER_BUCKETS, 8),
     ];
     let mut out = String::from(
         "// Eval weights as [middlegame, endgame] centipawn pairs, indexed by the\n\

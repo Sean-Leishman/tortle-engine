@@ -84,4 +84,7 @@ pub const W: [[i32; 2]; NUM_PARAMS] = [
     [  66,   -9], [  22,   16],
     // king attack per zone square: N B R Q
     [  16,  -11], [  15,   -4], [  44,  -16], [  42,    5],
+    // king danger by attack-unit bucket 0..15 (seed curve; tuner refits)
+    [   0,    0], [   0,    0], [   1,    0], [   3,    1], [   6,    2], [  10,    4], [  15,    6], [  21,    8],
+    [  28,   11], [  36,   14], [  45,   18], [  55,   22], [  66,   26], [  78,   31], [  91,   36], [ 105,   42],
 ];

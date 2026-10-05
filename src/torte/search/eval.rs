@@ -35,7 +35,11 @@ pub const EARLY_QUEEN: usize = UNDEVELOPED_MINOR + 1; // per undeveloped minor
 pub const TEMPO: usize = EARLY_QUEEN + 1;
 pub const ROOK_OPEN_FILE: usize = TEMPO + 1; // open, half-open
 pub const KING_ATTACK: usize = ROOK_OPEN_FILE + 2; // N B R Q, per enemy king-zone square hit
-pub const NUM_PARAMS: usize = KING_ATTACK + 4;
+/// One weight per attack-unit bucket, so the *shape* of the danger curve is
+/// learned rather than hand-written. See `king_danger`.
+pub const KING_DANGER: usize = KING_ATTACK + 4;
+pub const KING_DANGER_BUCKETS: usize = 16;
+pub const NUM_PARAMS: usize = KING_DANGER + KING_DANGER_BUCKETS;
 
 /// Receives eval terms as (weight index, white-minus-black count).
 pub trait Trace {
@@ -290,6 +294,47 @@ fn king_attack<T: Trace>(board: &Board, t: &mut T) {
     }
 }
 
+/// Canonical attack weights per attacker (knight, bishop, rook, queen), used
+/// to turn "which pieces bear on the enemy king zone, and over how many
+/// squares" into a single unit count. These are fixed on purpose: the tuner
+/// learns the *response curve* in `KING_DANGER`, and letting it scale both the
+/// units and the curve would be the same degree of freedom twice over.
+const ATTACK_UNITS: [i32; 4] = [2, 2, 3, 5];
+
+/// King danger: sum attack units bearing on the enemy king zone, bucket the
+/// total, and charge one weight for that bucket.
+///
+/// This exists because `king_attack` above is *linear* in the number of
+/// attacked squares, and king safety is not: two attackers is a nuisance,
+/// four is usually winning. A linear term cannot express that however it is
+/// weighted, which is why a ≥2-attacker gate was bolted onto it. Bucketing
+/// makes the non-linearity learnable from the 725k labelled positions instead
+/// of guessed, and makes the gate unnecessary — low buckets simply learn to be
+/// worth about nothing.
+fn king_danger<T: Trace>(board: &Board, t: &mut T) {
+    let occ = Bitboard::from_u64(board.player_bbs[0].board | board.player_bbs[1].board);
+    for (knight_kind, enemy_king, sign) in
+        [(1, board.bbs[11].board, 1), (7, board.bbs[5].board, -1)]
+    {
+        if enemy_king == 0 {
+            continue;
+        }
+        let zone = king_attacks(SQ(enemy_king.trailing_zeros() as u8)).board | enemy_king;
+        let mut units = 0_i32;
+        for piece in 0..4 {
+            let mut bb = board.bbs[knight_kind + piece].board;
+            while bb != 0 {
+                let hits = (piece_attacks(piece, SQ(bb.trailing_zeros() as u8), occ) & zone)
+                    .count_ones() as i32;
+                units += ATTACK_UNITS[piece] * hits;
+                bb &= bb - 1;
+            }
+        }
+        let bucket = (units as usize).min(KING_DANGER_BUCKETS - 1);
+        t.add(KING_DANGER + bucket, sign);
+    }
+}
+
 /// Which evaluation terms are active. Defined here (not in `search`) so `eval`
 /// stays decoupled from `SearchConfig` — `search` builds one of these from its
 /// own config. All-false is a pure material eval.
@@ -307,8 +352,11 @@ pub struct EvalConfig {
     pub development: bool,
     /// Rooks on open / half-open files.
     pub rook_open_file: bool,
-    /// Piece pressure on the enemy king zone.
+    /// Piece pressure on the enemy king zone (linear; superseded by
+    /// `king_danger`, kept so the two can be compared).
     pub king_attack: bool,
+    /// Bucketed, non-linear king danger.
+    pub king_danger: bool,
 }
 
 impl EvalConfig {
@@ -322,6 +370,7 @@ impl EvalConfig {
             development: false,
             rook_open_file: false,
             king_attack: false,
+            king_danger: false,
         }
     }
 
@@ -331,6 +380,7 @@ impl EvalConfig {
             development: true,
             rook_open_file: true,
             king_attack: true,
+            king_danger: true,
             piece_square_tables: true,
             pawn_structure: true,
             bishop_pair: true,
@@ -371,6 +421,9 @@ pub fn trace<T: Trace>(board: &Board, cfg: EvalConfig, t: &mut T) {
     }
     if cfg.king_attack {
         king_attack(board, t);
+    }
+    if cfg.king_danger {
+        king_danger(board, t);
     }
     if cfg.development {
         development(board, t);

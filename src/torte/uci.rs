@@ -161,6 +161,10 @@ fn emit_options(config: &SearchConfig) {
         config.development
     ));
     emit(&format!(
+        "option name KingDanger type check default {}",
+        config.king_danger
+    ));
+    emit(&format!(
         "option name SeePruning type check default {}",
         config.see_pruning
     ));
@@ -300,6 +304,11 @@ pub fn apply_setoption(args: &str, config: &mut SearchConfig, tt: &mut Transposi
         "Development" => {
             if let Some(b) = parse_bool(&value) {
                 config.development = b;
+            }
+        }
+        "KingDanger" => {
+            if let Some(b) = parse_bool(&value) {
+                config.king_danger = b;
             }
         }
         "SeePruning" => {
