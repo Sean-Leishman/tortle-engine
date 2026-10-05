@@ -87,8 +87,10 @@ current CCRL list:
 
 | Opponent | ~CCRL Blitz |
 |----------|-------------|
-| Sungorus 1.4 | ~2000 | the anchor |
+| Sungorus 1.4 | ~2000 | the anchor — the only figure to quote as a rating |
 | Vice 1.1 | — | unbuildable on modern glibc, see above |
+| SF18 `UCI_Elo=2500` | **not a rating** | calibrated 2026-10-05: −4 ± 67 vs torte over 80 games, i.e. **~50%**. Use this for A/B work |
+| SF18 `UCI_Elo=1800/2100/2300` | **not a rating** | torte scores 81.9% / 75.6% / 66.9%. The dial plays 400-660 pts below its label and is non-linear |
 | SF18 @ UCI_Elo 1500 / 1800 / 2100 | self-reported; poorly calibrated at the low end — use as a *relative* bracket, not an anchor |
 
 ## Caveats
