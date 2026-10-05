@@ -37,6 +37,11 @@ legality lazily on the board it makes anyway, which deleted ~35 board copies
 per node. Option B is the full version — decide legality *without* making the
 move at all.
 
+> **GATE RESOLVED 2026-10-05 — do not build B without new evidence.** A measured
+> **24.5% faster** (16/16 paired rounds on a quiet machine, identical node
+> totals). The remainder B chases is one `is_attacked` call per *searched* move
+> against the bug surface listed below. Spend the effort on make/unmake instead.
+
 **Read this first: A has probably already banked most of the win.** Before A,
 the legality filter copied and applied ~35 moves per node. After A, the only
 legality cost left is one `is_attacked` call per move the search *actually
