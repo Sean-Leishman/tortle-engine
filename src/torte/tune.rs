@@ -46,7 +46,7 @@ fn sigmoid(k: f64, e: f64) -> f64 {
     1.0 / (1.0 + (-k * e).exp())
 }
 
-fn load(path: &str) -> Vec<Position> {
+fn load_with(path: &str, cfg: EvalConfig) -> Vec<Position> {
     let text = fs::read_to_string(path).expect("read dataset");
     let w0: Vec<f64> = W.iter().flatten().map(|&x| x as f64).collect();
     text.lines()
@@ -60,7 +60,7 @@ fn load(path: &str) -> Vec<Position> {
             let fen: Vec<&str> = line.split_whitespace().take(4).collect();
             let board = Board::parse(&format!("{} 0 1", fen.join(" ")));
             let mut c = Coeffs([0; NUM_PARAMS]);
-            trace(&board, SearchConfig::default().eval_config(), &mut c);
+            trace(&board, cfg, &mut c);
             let phase = game_phase(&board);
             let p = Position {
                 terms: (0..NUM_PARAMS)
@@ -71,7 +71,7 @@ fn load(path: &str) -> Vec<Position> {
                 result,
             };
             // The float model must reproduce the engine's integer eval.
-            let engine = eval(&board, SearchConfig::default().eval_config())
+            let engine = eval(&board, cfg)
                 * if board.side_to_move == Color::White { 1 } else { -1 };
             assert!((model(&p, &w0) - engine as f64).abs() <= 1.0, "trace mismatch: {line}");
             Some(p)
@@ -122,10 +122,21 @@ fn loss_and_grad(data: &[Position], w: &[f64], k: f64, want_grad: bool) -> (f64,
 /// `params.rs` held at build time), per centipawn² per weight. It keeps rarely
 /// seen weights — a middlegame king on the 7th rank — from chasing noise. To
 /// anchor on a specific table, check that `params.rs` out first and rebuild.
-pub fn run(path: &str, epochs: usize, lambda: f64) {
+pub fn run(path: &str, epochs: usize, lambda: f64, drop_king_danger: bool) {
+    let mut cfg = SearchConfig::default().eval_config();
+    if drop_king_danger {
+        cfg.king_danger = false;
+    }
+    let all = load_with(path, cfg);
+    // **Contiguous** split, not every tenth position. Positions from one game
+    // are near-duplicates of each other, so an interleaved split puts a game's
+    // own positions on both sides of the boundary and the held-out loss then
+    // measures memorisation rather than generalisation. Our self-play file is
+    // written in game order, so holding out the tail holds out whole games.
+    let cut = all.len() * 9 / 10;
     let (mut data, mut valid) = (Vec::new(), Vec::new());
-    for (i, p) in load(path).into_iter().enumerate() {
-        if i % 10 == 0 { valid.push(p) } else { data.push(p) }
+    for (i, p) in all.into_iter().enumerate() {
+        if i < cut { data.push(p) } else { valid.push(p) }
     }
     let mut w: Vec<f64> = W.iter().flatten().map(|&x| x as f64).collect();
     let w0 = w.clone();
