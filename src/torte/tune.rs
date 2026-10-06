@@ -185,7 +185,7 @@ pub fn run(path: &str, epochs: usize, lambda: f64, drop_king_danger: bool) {
 }
 
 fn render(w: &[f64]) -> String {
-    const SECTIONS: [(&str, usize, usize, usize); 19] = [
+    const SECTIONS: [(&str, usize, usize, usize); 20] = [
         ("material: P N B R Q K", MATERIAL, 6, 6),
         ("pawn PST, a1..h8", PST, 64, 8),
         ("knight PST, a1..h8", PST + 64, 64, 8),
@@ -205,6 +205,7 @@ fn render(w: &[f64]) -> String {
         ("rook file: open, half-open", ROOK_OPEN_FILE, 2, 2),
         ("king attack per zone square: N B R Q", KING_ATTACK, 4, 4),
         ("king danger by attack-unit bucket 0..15", KING_DANGER, KING_DANGER_BUCKETS, 8),
+        ("threats: pawn-on-{minor,rook,queen}, minor-on-{rook,queen}, hanging", THREAT_PAWN_ON_MINOR, 6, 6),
     ];
     let mut out = String::from(
         "// Eval weights as [middlegame, endgame] centipawn pairs, indexed by the\n\

@@ -3,6 +3,7 @@ use crate::torte::board::pieces::Color;
 use crate::torte::core::bitboard::Bitboard;
 use crate::torte::core::sq::SQ;
 use crate::torte::movegen::attacks::{king_attacks, knight_attacks};
+use crate::torte::movegen::generator::is_attacked;
 use crate::torte::movegen::magic::{bishop_attacks, queen_attacks, rook_attacks};
 use crate::torte::search::params::W;
 
@@ -39,7 +40,17 @@ pub const KING_ATTACK: usize = ROOK_OPEN_FILE + 2; // N B R Q, per enemy king-zo
 /// learned rather than hand-written. See `king_danger`.
 pub const KING_DANGER: usize = KING_ATTACK + 4;
 pub const KING_DANGER_BUCKETS: usize = 16;
-pub const NUM_PARAMS: usize = KING_DANGER + KING_DANGER_BUCKETS;
+/// Threats: an enemy piece attacked by a cheaper attacker, and pieces left
+/// hanging. Six weights — pawn-on-{minor,rook,queen}, minor-on-{rook,queen},
+/// and hanging — rather than a full victim × attacker matrix, because 864
+/// weights on 86k positions already overfits (2026-10-06).
+pub const THREAT_PAWN_ON_MINOR: usize = KING_DANGER + KING_DANGER_BUCKETS;
+pub const THREAT_PAWN_ON_ROOK: usize = THREAT_PAWN_ON_MINOR + 1;
+pub const THREAT_PAWN_ON_QUEEN: usize = THREAT_PAWN_ON_ROOK + 1;
+pub const THREAT_MINOR_ON_ROOK: usize = THREAT_PAWN_ON_QUEEN + 1;
+pub const THREAT_MINOR_ON_QUEEN: usize = THREAT_MINOR_ON_ROOK + 1;
+pub const THREAT_HANGING: usize = THREAT_MINOR_ON_QUEEN + 1;
+pub const NUM_PARAMS: usize = THREAT_HANGING + 1;
 
 /// Receives eval terms as (weight index, white-minus-black count).
 pub trait Trace {
@@ -119,6 +130,7 @@ fn mobility<T: Trace>(board: &Board, t: &mut T) {
 }
 
 const FILE_A_BB: u64 = 0x0101010101010101;
+const FILE_H_BB: u64 = 0x8080808080808080;
 
 fn file_bb(file: u32) -> u64 {
     FILE_A_BB << file
@@ -335,6 +347,73 @@ fn king_danger<T: Trace>(board: &Board, t: &mut T) {
     }
 }
 
+/// Squares attacked by `color`'s pawns, in bulk.
+fn pawn_attack_span(pawns: u64, color: Color) -> u64 {
+    match color {
+        // a1 = bit 0, so a white pawn hits sq+7 (file−1) and sq+9 (file+1);
+        // mask the file that would wrap round the board.
+        Color::White => ((pawns & !FILE_A_BB) << 7) | ((pawns & !FILE_H_BB) << 9),
+        Color::Black => ((pawns & !FILE_H_BB) >> 7) | ((pawns & !FILE_A_BB) >> 9),
+    }
+}
+
+/// Threats: enemy pieces attacked by a cheaper attacker, plus pieces left
+/// hanging (attacked by us and defended by nobody).
+///
+/// The loss analysis of 2026-09-15 found torte's games are slow positional
+/// slides rather than blunders, which is consistent with an eval that cannot
+/// see a threat: it has no term for "your rook is attacked by my pawn", so the
+/// search has to find the gain tactically or not at all.
+fn threats<T: Trace>(board: &Board, t: &mut T) {
+    let occ = Bitboard::from_u64(board.player_bbs[0].board | board.player_bbs[1].board);
+    for (us, sign) in [(Color::White, 1_i32), (Color::Black, -1)] {
+        let (us_off, them_off) = if us == Color::White { (0_usize, 6_usize) } else { (6, 0) };
+        let them = us.opposite();
+
+        let minors = board.bbs[them_off + 1].board | board.bbs[them_off + 2].board;
+        let rooks = board.bbs[them_off + 3].board;
+        let queens = board.bbs[them_off + 4].board;
+
+        let patk = pawn_attack_span(board.bbs[us_off].board, us);
+        t.add(THREAT_PAWN_ON_MINOR, sign * (patk & minors).count_ones() as i32);
+        t.add(THREAT_PAWN_ON_ROOK, sign * (patk & rooks).count_ones() as i32);
+        t.add(THREAT_PAWN_ON_QUEEN, sign * (patk & queens).count_ones() as i32);
+
+        // Minor-piece attacks, and our full attack set for the hanging test.
+        let mut matk = 0_u64;
+        let mut all = patk | king_attacks(SQ(board.bbs[us_off + 5].board.trailing_zeros() as u8)).board;
+        if board.bbs[us_off + 5].board == 0 {
+            all = patk; // test positions without a king
+        }
+        for piece in 0..4 {
+            let mut bb = board.bbs[us_off + 1 + piece].board;
+            while bb != 0 {
+                let atk = piece_attacks(piece, SQ(bb.trailing_zeros() as u8), occ);
+                if piece < 2 {
+                    matk |= atk;
+                }
+                all |= atk;
+                bb &= bb - 1;
+            }
+        }
+        t.add(THREAT_MINOR_ON_ROOK, sign * (matk & rooks).count_ones() as i32);
+        t.add(THREAT_MINOR_ON_QUEEN, sign * (matk & queens).count_ones() as i32);
+
+        // Hanging: we attack it, they do not defend it. Pawns excluded — a
+        // loose pawn is normal and would swamp the count.
+        let mut victims = all & (minors | rooks | queens);
+        let mut hanging = 0_i32;
+        while victims != 0 {
+            let sq = SQ(victims.trailing_zeros() as u8);
+            victims &= victims - 1;
+            if !is_attacked(board, sq, them) {
+                hanging += 1;
+            }
+        }
+        t.add(THREAT_HANGING, sign * hanging);
+    }
+}
+
 /// Which evaluation terms are active. Defined here (not in `search`) so `eval`
 /// stays decoupled from `SearchConfig` — `search` builds one of these from its
 /// own config. All-false is a pure material eval.
@@ -357,6 +436,8 @@ pub struct EvalConfig {
     pub king_attack: bool,
     /// Bucketed, non-linear king danger.
     pub king_danger: bool,
+    /// Threatened and hanging enemy pieces.
+    pub threats: bool,
 }
 
 impl EvalConfig {
@@ -371,6 +452,7 @@ impl EvalConfig {
             rook_open_file: false,
             king_attack: false,
             king_danger: false,
+            threats: false,
         }
     }
 
@@ -381,6 +463,7 @@ impl EvalConfig {
             rook_open_file: true,
             king_attack: true,
             king_danger: true,
+            threats: true,
             piece_square_tables: true,
             pawn_structure: true,
             bishop_pair: true,
@@ -424,6 +507,9 @@ pub fn trace<T: Trace>(board: &Board, cfg: EvalConfig, t: &mut T) {
     }
     if cfg.king_danger {
         king_danger(board, t);
+    }
+    if cfg.threats {
+        threats(board, t);
     }
     if cfg.development {
         development(board, t);
@@ -716,6 +802,29 @@ mod tests {
         assert_eq!(count(KING_ATTACK + 3, &lone, cfg), 0);
         assert!(count(KING_ATTACK + 3, &pair, cfg) > 0);
         assert_eq!(count(KING_ATTACK, &pair, cfg), 2); // Ng5 hits f7, h7
+    }
+
+    #[test]
+    fn threats_count_cheap_attackers_and_hanging_pieces() {
+        let cfg = EvalConfig { threats: true, ..EvalConfig::material_only() };
+        // White's d4 pawn forks the knight on c5 and the bishop on e5, and
+        // black's lone king defends neither, so both are also hanging.
+        let fork = Board::parse("4k3/8/8/2n1b3/3P4/8/8/4K3 w - - 0 1");
+        assert_eq!(count(THREAT_PAWN_ON_MINOR, &fork, cfg), 2);
+        // This also pins down that pawns are excluded as hanging victims: the
+        // e5 bishop attacks white's undefended d4 pawn, so if pawns counted,
+        // black would score 1 and the white-minus-black total would be 1.
+        assert_eq!(count(THREAT_HANGING, &fork, cfg), 2);
+
+        // Knight on e4 attacks the rook on d6; the rook is defended by the
+        // c7 pawn, so it is threatened but not hanging.
+        let guarded = Board::parse("4k3/2p5/3r4/8/4N3/8/8/4K3 w - - 0 1");
+        assert_eq!(count(THREAT_MINOR_ON_ROOK, &guarded, cfg), 1);
+        assert_eq!(count(THREAT_HANGING, &guarded, cfg), 0);
+
+        // Mirrored: black's d5 pawn forking white minors scores negative.
+        let mirrored = Board::parse("4k3/8/8/3p4/2N1B3/8/8/4K3 b - - 0 1");
+        assert_eq!(count(THREAT_PAWN_ON_MINOR, &mirrored, cfg), -2);
     }
 
     #[test]

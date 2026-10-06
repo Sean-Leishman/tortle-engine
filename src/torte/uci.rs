@@ -161,6 +161,10 @@ fn emit_options(config: &SearchConfig) {
         config.development
     ));
     emit(&format!(
+        "option name Threats type check default {}",
+        config.threats
+    ));
+    emit(&format!(
         "option name KingDanger type check default {}",
         config.king_danger
     ));
@@ -304,6 +308,11 @@ pub fn apply_setoption(args: &str, config: &mut SearchConfig, tt: &mut Transposi
         "Development" => {
             if let Some(b) = parse_bool(&value) {
                 config.development = b;
+            }
+        }
+        "Threats" => {
+            if let Some(b) = parse_bool(&value) {
+                config.threats = b;
             }
         }
         "KingDanger" => {

@@ -117,6 +117,7 @@ pub struct SearchConfig {
     pub rook_open_file: bool,
     pub king_attack: bool,
     pub king_danger: bool,
+    pub threats: bool,
     pub late_move_pruning: bool,
     /// Quiet-move budget at depth d is `lmp_base + d²`.
     pub lmp_base: i32,
@@ -157,6 +158,10 @@ impl Default for SearchConfig {
             // that inverted `Development`'s sign. Flip these to compare.
             king_attack: false,
             king_danger: true,
+            // Default off until king danger has its own SPRT verdict: two
+            // unmeasured eval terms at once is the batching mistake that cost
+            // two days in September.
+            threats: false,
             // Measured −132 ± 38 Elo over 284 games (2026-09-29), same binary
             // both sides. Off until the thresholds are re-tuned for the
             // corrected quiet-move counting; see the work log.
@@ -187,6 +192,7 @@ impl SearchConfig {
             rook_open_file: self.rook_open_file,
             king_attack: self.king_attack,
             king_danger: self.king_danger,
+            threats: self.threats,
         }
     }
 }
