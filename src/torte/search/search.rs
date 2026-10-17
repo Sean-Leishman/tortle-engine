@@ -1273,6 +1273,7 @@ mod tests {
                 piece_square_tables: false,
                 development: false,
                 king_danger: false,
+                threats: false,
                 ..SearchConfig::default()
             },
         )
@@ -1348,6 +1349,7 @@ mod tests {
                 piece_square_tables: false,
                 development: false,
                 king_danger: false,
+                threats: false,
                 ..SearchConfig::default()
             },
         )
@@ -1361,6 +1363,7 @@ mod tests {
                 piece_square_tables: false,
                 development: false,
                 king_danger: false,
+                threats: false,
                 ..SearchConfig::default()
             },
         )
@@ -1640,6 +1643,7 @@ mod tests {
                 piece_square_tables: false,
                 development: false,
                 king_danger: false,
+                threats: false,
                 ..SearchConfig::default()
             },
         )

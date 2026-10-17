@@ -380,10 +380,15 @@ fn threats<T: Trace>(board: &Board, t: &mut T) {
         t.add(THREAT_PAWN_ON_QUEEN, sign * (patk & queens).count_ones() as i32);
 
         // Minor-piece attacks, and our full attack set for the hanging test.
+        // The king guard must come *before* the lookup: `trailing_zeros()` on
+        // an empty bitboard returns 64, which indexes past KING_ATTACKS and
+        // panics. Legal games always have a king, but `position fen` accepts
+        // arbitrary input, so this was a real crash path.
         let mut matk = 0_u64;
-        let mut all = patk | king_attacks(SQ(board.bbs[us_off + 5].board.trailing_zeros() as u8)).board;
-        if board.bbs[us_off + 5].board == 0 {
-            all = patk; // test positions without a king
+        let king_bb = board.bbs[us_off + 5].board;
+        let mut all = patk;
+        if king_bb != 0 {
+            all |= king_attacks(SQ(king_bb.trailing_zeros() as u8)).board;
         }
         for piece in 0..4 {
             let mut bb = board.bbs[us_off + 1 + piece].board;
@@ -825,6 +830,16 @@ mod tests {
         // Mirrored: black's d5 pawn forking white minors scores negative.
         let mirrored = Board::parse("4k3/8/8/3p4/2N1B3/8/8/4K3 b - - 0 1");
         assert_eq!(count(THREAT_PAWN_ON_MINOR, &mirrored, cfg), -2);
+    }
+
+    #[test]
+    fn threats_survive_a_position_with_no_king() {
+        // `position fen` accepts arbitrary input; an empty king bitboard used
+        // to index past KING_ATTACKS and panic.
+        let cfg = EvalConfig { threats: true, ..EvalConfig::material_only() };
+        // Ne4 attacks d6 (knights on e4 do not reach d5).
+        let kingless = Board::parse("8/8/3r4/8/4N3/8/8/8 w - - 0 1");
+        assert_eq!(count(THREAT_MINOR_ON_ROOK, &kingless, cfg), 1);
     }
 
     #[test]
