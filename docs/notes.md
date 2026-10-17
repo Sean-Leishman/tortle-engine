@@ -48,3 +48,29 @@ In rough order:
 
 - Why "tortle"? (D&D? Just a pun on torte?)
 - Is the goal a competitive engine, a teaching engine, or just an excuse to write Rust?
+
+### 2026-10-17 — threats shipped, make/unmake rejected, an LMR indexing bug found
+
+- **Threats: +24 ± 21 Elo over 801 games.** First eval term in five attempts to
+  measure positive. Shipped on by default; `params.rs` carries its fit and
+  `bench 8` matches the measured binary exactly (1,524,096 nodes).
+- **Make/unmake: rejected without building it.** The board copy is 1.57 per node
+  and ~8 inlined vector moves (`objdump` on `qsearch`), under 1% of runtime. Two
+  wall-clock micro-benchmarks gave *opposite* answers — one confounded by a
+  `black_box` barrier, one by LLVM swapping the inlined copy for `memcpy` at 248
+  bytes. Reading the generated code was cheaper than both and the only thing
+  that answered the question. Revisit only if `Board` grows a lot, i.e. as a
+  prerequisite for an NNUE accumulator.
+- **`LateMoveReductions` is indexed by all legal moves, not quiets** — the same
+  defect fixed for LMP on 2026-09-28. Quiet-indexing it reduces far less (+41%
+  bench nodes), so the bug has been buying aggression; whether that aggression
+  is worth Elo is now under SPRT. This was found incidentally while chasing SEE
+  ordering, and is the better lead of the two.
+- **SEE ordering: built, default off, not queued.** `see < 0` is the wrong cut
+  (8.4% of all beta cutoffs are caused by a capture SEE calls losing); ≥100 cp
+  is −10% nodes with LMR off. Its measurement is entangled with the LMR index,
+  so it waits.
+
+Open question for next session: if `LmrQuietIndex` measures null, the search
+category is close to exhausted at this strength and the direction decision
+(NNUE, which needs make/unmake first, versus stopping at ~1840) is the real one.
