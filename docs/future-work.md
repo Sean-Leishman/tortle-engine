@@ -40,7 +40,9 @@ move at all.
 > **GATE RESOLVED 2026-10-05 — do not build B without new evidence.** A measured
 > **24.5% faster** (16/16 paired rounds on a quiet machine, identical node
 > totals). The remainder B chases is one `is_attacked` call per *searched* move
-> against the bug surface listed below. Spend the effort on make/unmake instead.
+> against the bug surface listed below. **Nor make/unmake — priced and rejected
+> 2026-10-17 (see the work log): the copy is ~8 inlined vector moves, under 1%
+> of runtime.**
 
 **Read this first: A has probably already banked most of the win.** Before A,
 the legality filter copied and applied ~35 moves per node. After A, the only
@@ -52,11 +54,17 @@ own numbers are direction-only: 5 of 6 paired rounds favour it, median ratio
 0.71, spread 0.21-1.31 at load ~10). If A's real win is large, the remainder B
 chases may not be worth the bug surface.
 
-**The bigger remaining lever is probably not B at all.** The search still does
-`let mut next = *board; next.apply_move(m)` — a 120-byte copy per *searched*
-move. Replacing that with make/unmake (an undo stack carrying captured piece,
-castling rights, ep square, clocks and the Zobrist key) attacks a cost B does
-not touch. It is also the more invasive change, so measure first.
+**~~The bigger remaining lever is probably not B at all.~~ Measured and
+rejected, 2026-10-17.** The search does `let mut next = *board;
+next.apply_move(m)` — but that copy is **1.57 per node** and compiles to **~8
+inlined 16-byte vector moves with no call** (`objdump` on `qsearch`), so it is
+under 1% of runtime. Make/unmake would trade it for an undo restoring `bbs`,
+`player_bbs`, zobrist, castling rights, ep square and both clocks — comparable
+work, plus a state stack and a real bug surface. **Build it only when `Board`
+gets much bigger, i.e. as a prerequisite for an NNUE accumulator.** Two wall-clock
+micro-benchmarks gave opposite answers here (one confounded by a `black_box`
+barrier, one by LLVM swapping the inlined copy for `memcpy` at 248 bytes);
+reading the generated code was both cheaper and the only thing that answered it.
 
 ### Design, if it goes ahead
 
