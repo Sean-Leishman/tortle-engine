@@ -162,7 +162,15 @@ fn emit_options(config: &SearchConfig) {
     ));
     emit(&format!(
         "option name Threats type check default {}",
-        config.threats
+        config.threats,
+    ));
+    emit(&format!(
+        "option name SeeOrdering type check default {}",
+        config.see_ordering
+    ));
+    emit(&format!(
+        "option name LmrQuietIndex type check default {}",
+        config.lmr_quiet_index
     ));
     emit(&format!(
         "option name KingDanger type check default {}",
@@ -308,6 +316,16 @@ pub fn apply_setoption(args: &str, config: &mut SearchConfig, tt: &mut Transposi
         "Development" => {
             if let Some(b) = parse_bool(&value) {
                 config.development = b;
+            }
+        }
+        "SeeOrdering" => {
+            if let Some(b) = parse_bool(&value) {
+                config.see_ordering = b;
+            }
+        }
+        "LmrQuietIndex" => {
+            if let Some(b) = parse_bool(&value) {
+                config.lmr_quiet_index = b;
             }
         }
         "Threats" => {

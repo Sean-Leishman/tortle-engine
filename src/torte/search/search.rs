@@ -118,6 +118,8 @@ pub struct SearchConfig {
     pub king_attack: bool,
     pub king_danger: bool,
     pub threats: bool,
+    pub see_ordering: bool,
+    pub lmr_quiet_index: bool,
     pub late_move_pruning: bool,
     /// Quiet-move budget at depth d is `lmp_base + d²`.
     pub lmp_base: i32,
@@ -161,6 +163,12 @@ impl Default for SearchConfig {
             // +24 ± 21 Elo over 801 games (2026-10-17), matched builds that
             // differ only in this term and its refit weights.
             threats: true,
+            // Both default OFF: unmeasured. They are entangled — demoting
+            // captures pulls quiets to lower indices, which changes how much
+            // LMR reduces — so neither can be read without fixing the other.
+            // See the 2026-10-17 work-log entry.
+            see_ordering: false,
+            lmr_quiet_index: false,
             // Measured −132 ± 38 Elo over 284 games (2026-09-29), same binary
             // both sides. Off until the thresholds are re-tuned for the
             // corrected quiet-move counting; see the work log.
@@ -233,6 +241,13 @@ const LMR_MIN_DEPTH: u32 = 3;
 /// three moves (TT move, top MVV-LVA captures, killers) are searched at
 /// full depth; the tail gets reduced.
 const LMR_MIN_MOVE_IDX: usize = 3;
+
+/// `see_ordering` demotes a capture below the quiet moves only if it loses at
+/// least this much. Plain `see < 0` measured **worse** (+38.6% bench nodes,
+/// +5.1% with LMR's index interaction removed): a marginally losing capture is
+/// often the refutation — 8.4% of all beta cutoffs are caused by a capture SEE
+/// calls losing — so only the clear blunders are worth deferring.
+const SEE_ORDER_MAX_LOSS: i32 = -100;
 
 /// Apply futility pruning only at frontier depths. At depth 3+ the search
 /// tree is large enough that a single quiet move can swing the score by more
@@ -545,7 +560,7 @@ pub fn find_best_move_with_window(
     };
 
     if config.move_ordering {
-        order_moves(board, &mut moves, tt_move, killer_slice(killers, 0, config), history);
+        order_moves(board, &mut moves, tt_move, killer_slice(killers, 0, config), history, config.see_ordering);
     }
 
     let depth = depth.max(1);
@@ -788,7 +803,7 @@ fn negamax_inner(
         return terminal_score(board, ply);
     }
     if config.move_ordering {
-        order_moves(board, &mut moves, tt_move, killer_slice(killers, ply, config), history);
+        order_moves(board, &mut moves, tt_move, killer_slice(killers, ply, config), history, config.see_ordering);
     }
 
     // Set to the first *legal* move below; `moves[0]` may be illegal now.
@@ -859,7 +874,19 @@ fn negamax_inner(
         }
         let do_lmr = config.late_move_reductions
             && depth >= LMR_MIN_DEPTH
-            && move_index >= LMR_MIN_MOVE_IDX
+            && if config.lmr_quiet_index {
+                // LMR only ever reduces quiet moves, but `move_index` counts
+                // *all* legal moves, so in a capture-rich node every quiet is
+                // already past the threshold and gets reduced, while in a quiet
+                // node the first three escape. That is the same defect the LMP
+                // quiet-counting fix addressed on 2026-09-28, still unfixed
+                // here. `quiet_index` is 1-based and already counts this move,
+                // so `> 3` is the "from the 4th quiet onward" that
+                // `move_index >= 3` was meant to express.
+                quiet_index > LMR_MIN_MOVE_IDX
+            } else {
+                move_index >= LMR_MIN_MOVE_IDX
+            }
             && !node_in_check
             && !is_capture(board, m)
             && m.get_promotion().is_none();
@@ -1046,7 +1073,17 @@ fn qsearch(
     }
     let mut legal_moves = 0_usize;
     if config.move_ordering {
-        order_moves(board, &mut moves, None, [None, None], history);
+        order_moves(
+            board,
+            &mut moves,
+            None,
+            [None, None],
+            history,
+            // Deliberately not `config.see_ordering`: the loop below drops
+            // `see < 0` captures outright, so demoting them here would pay for
+            // the same static exchange twice in the hottest function we have.
+            false,
+        );
     }
 
     for m in moves {
@@ -1128,9 +1165,13 @@ fn order_moves(
     hint: Option<Move>,
     killers: [Option<Move>; 2],
     history: &HistoryTable,
+    see_ordering: bool,
 ) {
     let side = board.side_to_move.to_index();
-    moves.sort_by_key(|m| {
+    // `sort_by_cached_key`, not `sort_by_key`: with `see_ordering` on, the key
+    // runs a static exchange evaluation, and `sort_by_key` is free to call the
+    // key function more than once per element.
+    moves.sort_by_cached_key(|m| {
         // Lower key = searched earlier. Each category sits in its own
         // disjoint band: the TT move, then captures (MVV-LVA), then killers,
         // then quiet moves ranked by history score, with untried quiets
@@ -1141,6 +1182,17 @@ fn order_moves(
         }
         let mvv = mvv_lva_score(board, *m);
         if mvv > 0 {
+            // A capture is not a good move merely because it is a capture.
+            // MVV-LVA alone puts a defended `QxP` ahead of every quiet move,
+            // so its whole subtree is searched before the move that actually
+            // cuts off. Clear material losers go in their own band *after* the
+            // quiets, ranked by how little they lose.
+            if see_ordering {
+                let loss = see(board, *m);
+                if loss <= SEE_ORDER_MAX_LOSS {
+                    return (1 << 24) - loss;
+                }
+            }
             return -(1 << 28) - mvv;
         }
         if Some(*m) == killers[0] || Some(*m) == killers[1] {
@@ -1969,6 +2021,57 @@ mod tests {
     }
 
     #[test]
+    fn see_ordering_demotes_a_losing_capture_below_the_quiets() {
+        // Qxd5 wins a pawn and loses the queen to cxd5: SEE -800, far past
+        // SEE_ORDER_MAX_LOSS. MVV-LVA alone ranks it ahead of every quiet
+        // move, which is the whole problem the toggle addresses.
+        let board = pos("4k3/8/2p5/3p4/8/8/8/3QK3 w - - 0 1");
+        let qxd5 = Move::from_uci("d1d5");
+        let quiet = Move::from_uci("d1d2");
+        assert_eq!(see(&board, qxd5), -800, "fixture must be a clear loser");
+
+        let idx = |see_ordering| {
+            let mut moves = generate_legal_moves(&board);
+            let history = new_history();
+            order_moves(&board, &mut moves, None, [None, None], &history, see_ordering);
+            let find = |t: Move| moves.iter().position(|m| *m == t).unwrap();
+            (find(qxd5), find(quiet))
+        };
+
+        let (cap_off, quiet_off) = idx(false);
+        assert!(cap_off < quiet_off, "MVV-LVA alone must rank the capture first");
+        let (cap_on, quiet_on) = idx(true);
+        assert!(
+            cap_on > quiet_on,
+            "see_ordering must demote a -800 capture below the quiets"
+        );
+    }
+
+    #[test]
+    fn see_ordering_keeps_a_winning_capture_first() {
+        // The demotion must be about *losing* material, not about capturing:
+        // an undefended queen is still the first move to try.
+        let board = pos("4k3/8/8/3q4/8/8/8/3QK3 w - - 0 1");
+        let qxd5 = Move::from_uci("d1d5");
+        let mut moves = generate_legal_moves(&board);
+        let history = new_history();
+        order_moves(&board, &mut moves, None, [None, None], &history, true);
+        assert_eq!(moves[0], qxd5, "a free queen must still sort first");
+    }
+
+    #[test]
+    fn lmr_quiet_index_still_finds_forced_mate() {
+        // Smoke test: the toggle only changes *which* quiets get reduced, so
+        // a forced line must still be found. A reduction bug here would show
+        // up as a missed mate.
+        let board = pos("7k/8/6K1/8/8/8/5Q2/8 w - - 0 1");
+        let config = SearchConfig { lmr_quiet_index: true, ..SearchConfig::default() };
+        let (mv, score) = find_best_move_with(&board, 3, config).expect("a move exists");
+        assert!(score >= MATE_SCORE - 10, "expected a mate score, got {score}");
+        assert_eq!(mv.to_uci(), "f2f8");
+    }
+
+    #[test]
     fn order_moves_bands_are_disjoint() {
         // The capture / killer / history-quiet ordering bands must never
         // interleave: a capture sorts before any killer, and a killer before
@@ -1989,7 +2092,7 @@ mod tests {
         let mut history = new_history();
         history[side][hist_quiet.get_src().to_usize()][hist_quiet.get_dest().to_usize()] =
             HISTORY_MAX;
-        order_moves(&board, &mut moves, None, [Some(killer), None], &history);
+        order_moves(&board, &mut moves, None, [Some(killer), None], &history, false);
 
         let idx = |target: Move| moves.iter().position(|m| *m == target).unwrap();
         assert!(idx(capture) < idx(killer), "capture must sort before killer");
