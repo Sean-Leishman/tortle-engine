@@ -74,3 +74,28 @@ In rough order:
 Open question for next session: if `LmrQuietIndex` measures null, the search
 category is close to exhausted at this strength and the direction decision
 (NNUE, which needs make/unmake first, versus stopping at ~1840) is the real one.
+
+### 2026-10-18 — the LMR index null, and why the LMP analogy broke
+
+`LmrQuietIndex` measured **−1.3 ± 20.4 Elo over 800 games**, zero forfeits. The
+open question from the last session is answered: it is a null, and the search
+category is behaving as the eval-is-the-gap diagnosis predicted.
+
+The useful part is why my prediction failed. I expected LMP-off's shape (+67%
+nodes, +132 Elo) because the bug was literally the same bug in a sibling
+feature. The difference is that **LMR verifies and LMP did not**: a reduced
+search that beats alpha gets re-searched at full depth, so a wrong trigger index
+costs a wasted shallow pass, whereas a pruned move is simply gone. Verified
+speculation is insensitive to its trigger parameter; unverified speculation is
+not — which also explains, retroactively, why three LMP threshold settings could
+not be tuned into a gain and why NMP's R and the aspiration width both measure
+level.
+
+`SeeOrdering` is now unblocked and under SPRT. The LMR index measuring level
+means the interaction cannot be hiding a win in it.
+
+Still open, and now the real decision: the search category has four 800-game
+nulls and one large negative against one speedup. Eval has one convert
+(`Threats`, +24) in five attempts. NNUE is the only lever of a different
+magnitude, and it needs make/unmake as a prerequisite — that is a different size
+of project, not another toggle.
