@@ -99,3 +99,31 @@ nulls and one large negative against one speedup. Eval has one convert
 (`Threats`, +24) in five attempts. NNUE is the only lever of a different
 magnitude, and it needs make/unmake as a prerequisite — that is a different size
 of project, not another toggle.
+
+### 2026-10-20 — SEE ordering is promising and unproven; runs now get certified
+
+`SeeOrdering` measured **+10.9 ± 20.6 over 800 games** (51.56%, LOS 85%). Best
+search point estimate since lazy legality, and still consistent with zero.
+Separating +11 from 0 needs ~2,800 games, so a 2,600-game confirmation is queued
+rather than shipping on a 50/50 bet.
+
+The run survived a machine that hit load 51 with swap completely full, engines at
+28% CPU — and recorded **zero forfeits**, the check this project has been using to
+certify runs clean. So that check passed on a starving match. `bench/certify-run.py`
+replaces it with a direct measurement: the within-game depth differential, banded
+by round order. Both engines play the same game, so a depth gap between them is the
+engines' doing, not the position's. This run reads −0.032 ± 0.028 ply and flat while
+mean depth climbs 7.88 → 9.86 as the machine recovers: shared starvation, unbiased
+comparison, keep the games.
+
+Building it produced two false alarms, both the same mistake — assuming a
+differential means bias. It doesn't: `LmrQuietIndex` runs 0.18 ply shallower
+because it searches 41% more nodes, which is the trade being measured. Only
+*drift* indicates bias. And drift must be measured against round order, not
+absolute depth: depth bands select long drawn endgames (138 plies, 45% draws vs
+97 and 14%), which made a clean run look suspect. I wrote that warning in the
+docstring and then banded by depth anyway.
+
+Withdrawn from 10-18: the claim that starvation would understate `SeeOrdering`.
+Unsupported, and the test proposed for it was confounded. The run is unbiased and
+underpowered — different complaints, different fixes.
