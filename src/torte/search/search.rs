@@ -163,11 +163,15 @@ impl Default for SearchConfig {
             // +24 ± 21 Elo over 801 games (2026-10-17), matched builds that
             // differ only in this term and its refit weights.
             threats: true,
-            // Both default OFF: unmeasured. They are entangled — demoting
-            // captures pulls quiets to lower indices, which changes how much
-            // LMR reduces — so neither can be read without fixing the other.
-            // See the 2026-10-17 work-log entry.
-            see_ordering: false,
+            // Measured +17.4 ± 11.2 Elo over 2,664 pooled games (2026-11-15),
+            // same binary both sides; the 1,864-game confirmation accepted H1
+            // at LLR 2.96. The first search change to convert since lazy
+            // legality. See the 2026-11-15 work-log entry.
+            see_ordering: true,
+            // Measured −1.3 ± 20.4 over 800 games (2026-10-18) — a null, so it
+            // keeps the setting with the free nodes (+41% in the direction of
+            // not fixing it). LMR re-searches on a fail-high, so a wrong
+            // trigger index self-corrects.
             lmr_quiet_index: false,
             // Measured −132 ± 38 Elo over 284 games (2026-09-29), same binary
             // both sides. Off until the thresholds are re-tuned for the

@@ -127,3 +127,41 @@ docstring and then banded by depth anyway.
 Withdrawn from 10-18: the claim that starvation would understate `SeeOrdering`.
 Unsupported, and the test proposed for it was confounded. The run is unbiased and
 underpowered — different complaints, different fixes.
+
+### 2026-11-15 — SEE ordering converted, and the NMP claim in our own docs was wrong
+
+The confirmation run finished while nobody was watching. 1,864 games, H1 accepted,
+LLR 2.96. +20.2 ± 13.1 on its own; +17.4 ± 11.2 pooled over 2,664. Shipped.
+
+The power arithmetic from 10-20 predicted ±10 at ~2,800 games and delivered ±11.2
+at 2,664. That is the first time a planned sample size has been honoured end to end
+here, and it is worth more than the toggle: it means the Elo-power rule is usable
+for *budgeting* measurements rather than only for explaining them afterwards.
+
+What I want to resist reading into it: the point estimate went up, +10.9 → +20.2.
+An underpowered positive more often regresses. Had it regressed, not shipping on
+CI-includes-zero would have been the obvious right call; it went the other way and
+not shipping was *still* the right call, because the decision is evaluated against
+what was knowable at the time. A win that arrives after the discipline is not
+evidence against the discipline.
+
+Both search changes that ever converted here are non-speculative. Lazy legality
+changes how the tree is produced; SEE ordering changes the order it is searched in.
+Neither guesses a move away. The one large negative was the one unbounded discard.
+Three nulls are all triggers on speculation that gets verified or bounded. The
+taxonomy note holds across every search measurement in the project.
+
+Which made me check the engine's remaining discard, and the docs were wrong. The
+search gap paragraph claimed NMP verifies with a re-search. It does not — the null
+search fails high and `negamax` returns `beta` immediately, no full-depth check.
+NMP is a discard, it is on by default, and its trigger has never been measured
+alone. The taxonomy says that trigger should be load-bearing in a way LMR's was
+not. That is a prediction the project can be wrong about cheaply, which is the only
+kind worth writing down.
+
+Also: this run cannot claim zero forfeits. Four, 35-41 s overruns, three of them on
+`base` — which flatters the result. Scoring those as draws gives +19.6 instead of
++20.2, so it changes nothing, but the adjustment belongs in the record rather than
+in a footnote nobody computes. The certifier passed it at shift 0.042 against a
+±0.045 tolerance: the tightest margin yet, because the tolerance shrinks as 1/√N.
+Bigger matches are held to stricter standards by their own error bars.
