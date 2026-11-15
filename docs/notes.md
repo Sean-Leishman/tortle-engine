@@ -165,3 +165,35 @@ Also: this run cannot claim zero forfeits. Four, 35-41 s overruns, three of them
 in a footnote nobody computes. The certifier passed it at shift 0.042 against a
 ±0.045 tolerance: the tightest margin yet, because the tolerance shrinks as 1/√N.
 Bigger matches are held to stricter standards by their own error bars.
+
+### 2026-11-15 — a prediction with a falsifier attached, and a bug the knob exposed
+
+Exposed NMP's R and min-depth as spins so the taxonomy's one live prediction can
+be shot at: NMP discards without verifying, so its trigger should matter where
+LMR's did not.
+
+The design choice that took the most thought was the perturbation. The temptation
+is to pick a large one — R=5, say — because then a null is "clean". But a large
+perturbation tests nothing interesting: of course a wild setting hurts. The LMR
+experiment that produced the null was a *defensible* alternative, arguably the more
+correct one. So the matching NMP test is R=3, which is what most strong engines
+ship. Same power (800 games, ±20), same kind of perturbation, different class of
+feature. If it comes back null, the prediction is dead and I should say so plainly
+rather than reach for R=4.
+
+Which is the part I want to hold myself to. A null here is genuinely ambiguous —
+it could mean the trigger doesn't matter, or that 2 and 3 sit on a flat stretch of
+a curve with structure further out. Resolving that by sweeping R is exactly the LMP
+tuning dead end: monotone node counts over an arbitrary constant, no accuracy
+signal, two days gone. Recorded in advance that I won't.
+
+Exposing the knob found a real bug, which is a decent argument for exposing knobs.
+`depth - 1 - R` is u32. With R fixed at 2 and a min depth of 3 it could never wrap;
+with R settable from any GUI it wraps the moment R >= depth. Debug panics. Release
+is worse — it recurses at a wrapped near-infinite depth and never comes back. The
+test has a negative control: pull the guard and it dies with a stack overflow, so
+the test fails for the stated reason rather than passing by coincidence.
+
+Also moved the toggle A/B into sprt.sh. Every per-feature measurement here has been
+a scratchpad script, and I have now lost that script to a wiped scratchpad twice.
+Two env vars in the harness is cheaper than writing it a third time.
