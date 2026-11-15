@@ -213,6 +213,14 @@ fn emit_options(config: &SearchConfig) {
         config.lmp_max_depth
     ));
     emit(&format!(
+        "option name NullMoveReduction type spin default {} min 0 max 6",
+        config.null_move_reduction
+    ));
+    emit(&format!(
+        "option name NullMoveMinDepth type spin default {} min 1 max 10",
+        config.null_move_min_depth
+    ));
+    emit(&format!(
         "option name AspirationDelta type spin default {} min 10 max 2000",
         config.aspiration_delta
     ));
@@ -381,6 +389,16 @@ pub fn apply_setoption(args: &str, config: &mut SearchConfig, tt: &mut Transposi
         "LmpMaxDepth" => {
             if let Ok(v) = value.trim().parse::<u32>() {
                 config.lmp_max_depth = v.clamp(1, 10);
+            }
+        }
+        "NullMoveReduction" => {
+            if let Ok(v) = value.trim().parse::<u32>() {
+                config.null_move_reduction = v.clamp(0, 6);
+            }
+        }
+        "NullMoveMinDepth" => {
+            if let Ok(v) = value.trim().parse::<u32>() {
+                config.null_move_min_depth = v.clamp(1, 10);
             }
         }
         "AspirationDelta" => {

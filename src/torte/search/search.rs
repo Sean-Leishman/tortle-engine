@@ -108,6 +108,9 @@ pub struct SearchConfig {
     pub history_heuristic: bool,
     pub mid_search_abort: bool,
     pub null_move_pruning: bool,
+    /// NMP depth reduction R, and the shallowest depth at which NMP fires.
+    pub null_move_reduction: u32,
+    pub null_move_min_depth: u32,
     pub aspiration_windows: bool,
     pub late_move_reductions: bool,
     pub futility_pruning: bool,
@@ -148,6 +151,8 @@ impl Default for SearchConfig {
             history_heuristic: true,
             mid_search_abort: true,
             null_move_pruning: true,
+            null_move_reduction: NULL_MOVE_REDUCTION,
+            null_move_min_depth: NULL_MOVE_MIN_DEPTH,
             aspiration_windows: true,
             late_move_reductions: true,
             futility_pruning: true,
@@ -228,6 +233,13 @@ const ASPIRATION_MIN_DEPTH: u32 = 5;
 /// Reduction `R` for null-move search: search at `depth - 1 - R`. R=2 is the
 /// classic conservative value; some engines use R=3 above depth 6.
 const NULL_MOVE_REDUCTION: u32 = 2;
+
+/// Both NMP triggers are exposed as UCI spins (`NullMoveReduction`,
+/// `NullMoveMinDepth`) so R can be A/B-ed by `setoption` rather than by
+/// rebuilding. Unlike LMR, NMP has **no verification search** — a reduced
+/// null search that fails high returns `beta` outright — so the taxonomy
+/// predicts these triggers are load-bearing where LMR's index was not.
+/// Unmeasured as of 2026-11-15; see the work log.
 
 /// Skip null-move pruning shallower than this. Below the threshold the saved
 /// work doesn't justify the risk of pruning a tactical line.
@@ -756,7 +768,7 @@ fn negamax_inner(
     // giving up the turn, which never happens with real pieces). Skip near
     // mate windows so we don't prune through a mate. Reduce by R.
     if config.null_move_pruning
-        && depth >= NULL_MOVE_MIN_DEPTH
+        && depth >= config.null_move_min_depth
         && beta.abs() < MATE_SCORE - 1000
         && !node_in_check
         && has_non_pawn_material(board, board.side_to_move)
@@ -776,7 +788,11 @@ fn negamax_inner(
         // fifty-move detection inside the null subtree, which is fine — the
         // null search is a heuristic bound, not a claimed line.
         null.halfmove_clock = 0;
-        let reduced = depth - 1 - NULL_MOVE_REDUCTION;
+        // saturating: `NullMoveReduction` is settable, so R >= depth is
+        // reachable from UCI and `depth - 1 - R` would wrap. Clamping to 0
+        // means the null search is a qsearch, which is the honest reading of
+        // "reduce by more plies than remain".
+        let reduced = depth.saturating_sub(1 + config.null_move_reduction);
         let score = -negamax(
             &null,
             reduced,
@@ -1850,6 +1866,26 @@ mod tests {
         )
         .unwrap();
         assert_eq!(score, MATE_SCORE - 1);
+    }
+
+    #[test]
+    fn null_move_reduction_larger_than_depth_terminates() {
+        // `NullMoveReduction` is settable from UCI, so R >= depth is reachable.
+        // `depth - 1 - R` on u32 would wrap: a debug build panics, and a
+        // release build is worse — it recurses at a near-infinite depth and
+        // the search never returns. The saturating_sub keeps it at qsearch.
+        let board = pos("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1");
+        let result = find_best_move_with(
+            &board,
+            3,
+            SearchConfig {
+                null_move_pruning: true,
+                null_move_reduction: 6,
+                null_move_min_depth: 1,
+                ..SearchConfig::default()
+            },
+        );
+        assert!(result.is_some(), "search must return with R > depth");
     }
 
     #[test]
