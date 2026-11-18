@@ -230,16 +230,22 @@ pub const ASPIRATION_DELTA: i32 = 100;
 /// causes more re-searches than savings.
 const ASPIRATION_MIN_DEPTH: u32 = 5;
 
-/// Reduction `R` for null-move search: search at `depth - 1 - R`. R=2 is the
-/// classic conservative value; some engines use R=3 above depth 6.
-const NULL_MOVE_REDUCTION: u32 = 2;
+/// Reduction `R` for null-move search: search at `depth - 1 - R`.
+///
+/// **R=3, measured +27.4 ± 20.2 Elo over 788 clean games (2026-11-18)** against
+/// the R=2 it replaced — same binary, `option.NullMoveReduction=3`. R=2 is the
+/// classic conservative value and it was costing ~27 Elo. The two differ only
+/// from depth 4 up: at depth 3 both reduce to 0, so this is a single change.
+const NULL_MOVE_REDUCTION: u32 = 3;
 
 /// Both NMP triggers are exposed as UCI spins (`NullMoveReduction`,
 /// `NullMoveMinDepth`) so R can be A/B-ed by `setoption` rather than by
 /// rebuilding. Unlike LMR, NMP has **no verification search** — a reduced
 /// null search that fails high returns `beta` outright — so the taxonomy
 /// predicts these triggers are load-bearing where LMR's index was not.
-/// Unmeasured as of 2026-11-15; see the work log.
+/// **That prediction was tested and held**: perturbing R moved 800 games by
+/// +27.4 ± 20.2 where the same perturbation of LMR's index moved them by
+/// −1.3 ± 20.4. See the 2026-11-18 work-log entry.
 
 /// Skip null-move pruning shallower than this. Below the threshold the saved
 /// work doesn't justify the risk of pruning a tactical line.

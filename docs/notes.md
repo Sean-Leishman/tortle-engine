@@ -197,3 +197,38 @@ the test fails for the stated reason rather than passing by coincidence.
 Also moved the toggle A/B into sprt.sh. Every per-feature measurement here has been
 a scratchpad script, and I have now lost that script to a wiped scratchpad twice.
 Two env vars in the harness is cheaper than writing it a third time.
+
+### 2026-11-18 — the prediction held, and the forfeits were the interesting part
+
+R=2 → R=3 is +27.4 ± 20.2 over 788 clean games. Against the LMR index's
+−1.3 ± 20.4 at the same 800-game power. Shipped.
+
+What makes this worth more than the 27 Elo: the taxonomy constrained a measurement
+in advance instead of explaining one afterwards. I wrote down the perturbation, the
+power, and what would kill the claim, three days before the games existed. That is
+the first time this project has done that and been right.
+
+The refinement I did not expect to have to make. Being a discard makes the trigger
+load-bearing — confirmed — but it says nothing about which way to turn it. LMP is
+also a discard, and more aggression cost it 132 Elo. NMP is a discard, and more
+aggression gained 27. The class predicts sensitivity, not sign; the sign comes from
+how good the underlying heuristic is, and a null-move test is a much better
+"this subtree is hopeless" predictor than a quiet-move count. Worth saying plainly
+because the sloppy reading of my own note would have been "discards are dangerous,
+reduce aggression", which is the opposite of what the games say here.
+
+The forfeits taught me something about the certifier. Twelve, in two bursts of
+exactly six at concurrency 6 — every in-flight game blowing its clock at the same
+instant, twice. certify-run.py passed the run CLEAN, and it was right to: a spike
+that hits all six games hits both engines, so the comparison is unbiased. But
+twelve individual games were garbage all the same. The certifier answers "was the
+comparison skewed", not "is every game sound", and I had been treating it as
+though it answered both. This run needed both questions asked separately — hence
+recomputing four ways (all games, forfeits dropped, burst windows dropped, forfeits
+rescored as draws) and quoting the most conservative. 2.4 Elo of spread. Nothing
+turned on it this time, which is luck rather than vindication.
+
+And the guard from 11-15 is the reason there is a result at all. R=3 at depth 3
+computes 3−1−3 on u32. Without the saturating_sub the match would have recursed at
+depth 4,294,967,295 and died in its first second. A bug found while exposing a knob,
+which would have silently destroyed the experiment the knob was for.
