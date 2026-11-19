@@ -232,3 +232,43 @@ And the guard from 11-15 is the reason there is a result at all. R=3 at depth 3
 computes 3−1−3 on u32. Without the saturating_sub the match would have recursed at
 depth 4,294,967,295 and died in its first second. A bug found while exposing a knob,
 which would have silently destroyed the experiment the knob was for.
+
+### 2026-11-19 — the ladder finally moved, and I misread my own CI for a minute
+
+R=4 vs R=3 is +4.8 ± 20.7. Null. The knob is closed at 3, which is what the stop
+condition I wrote on 11-18 said would happen, so it happened. Worth noting only
+because the LMP dead end is the counterexample: there I kept going and bought three
+negatives and two days. The difference this time was having an accuracy signal
+(+27 for 2→3) that then failed to extend (+5 for 3→4) — that shape is a local
+optimum, and the right response to a local optimum is to stop standing on it.
+
+Then the ladder, which is the first real news in seven weeks. 54.25% against
+Sungorus over 400 games, +29.6, CI [−1.8, +61.5]. Against −162 ± 50 on 09-30.
+
+I read that as "beats Sungorus" for about a minute before recomputing from the
+PGN and noticing the interval includes zero. It does not say torte is ahead; it
+says torte is level and might be ahead. The thing I nearly did — take a point
+estimate I wanted and quote it without its interval — is precisely what the
+underpowered-measurement discipline exists to stop, and I have now caught myself
+doing it twice in one session (the same slip, smaller, on the forfeit
+characterisation). The lesson I actually take: the interval is part of the number,
+and a number that excites me is the one most likely to get quoted without it.
+
+The honest framing is the delta, which is unambiguous: +192 ± 59 since 09-30,
+CI [+133, +251]. That is the first movement in the headline figure since this
+project started measuring properly, and on the soft anchor it puts torte near
+~2030 against ~1840.
+
+What does not close is the arithmetic. Accounted gains are lazy legality +58,
+Threats +24, SeeOrdering +17, NMP R=3 +27 = +126, plus the abort-interval fix.
+The ladder says +192. The *sign* of the gap is the surprise — self-play normally
+flatters a change (09-30: +113 self-play, +22 ladder), so finding the ladder ahead
+of the sum is backwards. Most likely both endpoints are just wide and meeting at
+their edges: −162 ± 50 permits −112, which closes it. I am not going to dress that
+up as a finding; it is the leading hypothesis and the alternative (some change is
+worth more against a stronger opponent than against itself) is untested.
+
+Side effect worth acting on: the Stockfish UCI_Elo=2500 sparring partner was
+calibrated to 49.4% when torte was ~190 points weaker. It is no longer a near-even
+opponent, which defeats the only reason it was chosen. That calibration needs
+redoing before anyone leans on it.
